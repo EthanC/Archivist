@@ -58,8 +58,6 @@ jobs:
   documentation:
     name: Documentation
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
 
     steps:
       - name: Configure Pages
@@ -86,8 +84,16 @@ jobs:
           name: github-pages-${{ github.run_attempt }}
           path: site
 
+  deploy-documentation:
+    name: Deploy documentation
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: documentation
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+
+    steps:
       - name: Deploy documentation
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/deploy-pages@v5
         id: deployment
         with:
