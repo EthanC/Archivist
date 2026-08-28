@@ -1,7 +1,7 @@
 [project]
 name = "archivist-py"
 version = "1.0.0"
-description = "Typed synchronous and asynchronous clients for public web archives"
+description = "Preserve the web and retrieve archives with a typed Python API."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"
