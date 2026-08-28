@@ -1,0 +1,105 @@
+[project]
+name = "archivist-py"
+version = "1.0.0"
+description = "Typed synchronous and asynchronous clients for public web archives"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Ethan C", email = "16727756+EthanC@users.noreply.github.com" },
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU Affero General Public License v3",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "niquests>=3.21",
+]
+
+[project.urls]
+Changelog = "https://github.com/EthanC/Archivist/releases"
+Documentation = "https://archivist.e3n.im/"
+Issues = "https://github.com/EthanC/Archivist/issues"
+Repository = "https://github.com/EthanC/Archivist"
+
+[dependency-groups]
+dev = [
+  "pytest>=9.1.1",
+  "pytest-asyncio>=1.4.0",
+  "pytest-cov>=7.1.0",
+  "ruff>=0.16.4",
+  "ty>=0.0.74",
+  "zensical>=0.0.51",
+  "mkdocstrings-python>=2.0.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.4,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.coverage.run]
+branch = true
+source = ["archivist"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+
+[tool.pytest]
+addopts = [
+  "-ra",
+  "--import-mode=importlib",
+  "--strict-config",
+  "--strict-markers",
+  "-m",
+  "not live",
+  "--cov=archivist",
+  "--cov-branch",
+  "--cov-report=term-missing",
+]
+log_cli = true
+log_cli_level = "WARNING"
+markers = [
+  "live: accesses a live archive service and is excluded from normal test runs",
+]
+strict_xfail = true
+testpaths = ["tests"]
+asyncio_mode = "strict"
+
+[tool.ruff]
+fix = true
+show-fixes = true
+
+[tool.ruff.lint]
+select = ["A", "ANN", "ASYNC", "B", "C4", "D", "E", "F", "I", "LOG", "N", "PERF", "PIE", "PL", "PTH", "RUF", "SIM", "UP", "W"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.tox]
+requires = ["tox>=4.58.0", "tox-uv>=1.36.0"]
+env_list = [
+  "3.14",
+  "3.13",
+  "3.12",
+  "3.11",
+]
+
+[tool.tox.env_run_base]
+description = "Run tests under {base_python}"
+dependency_groups = ["dev"]
+commands = [["pytest"]]
+allowlist_externals = ["pytest"]
+
+[tool.uv.build-backend]
+module-name = "archivist"
+module-root = "src"
+source-exclude = ["src/archivist/services/ghostarchive"]

@@ -1,0 +1,22 @@
+[project]
+site_name = "Archivist"
+site_description = "Preserve the web and retrieve archives with a typed Python API."
+site_url = "https://archivist.e3n.im/"
+site_author = "Ethan C"
+extra_css = ["stylesheets/extra.css"]
+
+[project.theme]
+palette.scheme = "slate"
+palette.primary = "custom"
+palette.accent = "custom"
+logo = "images/icon.svg"
+favicon = "images/icon.svg"
+
+[project.plugins.mkdocstrings.handlers.python]
+inventories = ["https://docs.python.org/3/objects.inv"]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+inherited_members = true
+show_source = false
