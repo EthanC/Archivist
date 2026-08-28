@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any, ParamSpec, TypedDict, TypeVar, cast
 from urllib.parse import urlsplit
 
+from archivist.core._http import sanitize_service_reason
 from archivist.core.errors import (
     CaptureFailedError,
     InvalidOptionError,
@@ -232,8 +233,10 @@ def parse_submission(
 ) -> InternetArchiveCaptureJob:
     if data.get("status") == "error":
         code = _optional_string(data.get("status_ext"))
+        reason = sanitize_service_reason(data.get("message"))
+        reason_suffix = f": {reason}" if reason is not None else ""
         raise CaptureFailedError(
-            f"{SERVICE} rejected the capture request",
+            f"{SERVICE} rejected the capture request{reason_suffix}",
             service=SERVICE,
             service_code=code,
         )
@@ -376,7 +379,7 @@ def parse_capture_status(
     if status == "error":
         return InternetArchiveFailedStatus(
             job_id=job_id_value,
-            message=_optional_string(data.get("message")),
+            message=sanitize_service_reason(data.get("message")),
             service_code=_optional_string(data.get("status_ext")),
             resources=resources,
         )

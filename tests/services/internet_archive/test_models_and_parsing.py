@@ -157,11 +157,12 @@ def test_status_parser_supports_pending_success_failure_and_outlink_shapes() -> 
             "status": "error",
             "job_id": "three",
             "status_ext": "error:blocked",
+            "message": "<strong>Target blocked</strong>",
             "resources": [],
         }
     )
     assert failed == InternetArchiveFailedStatus(
-        job_id="three", service_code="error:blocked"
+        job_id="three", message="Target blocked", service_code="error:blocked"
     )
 
 

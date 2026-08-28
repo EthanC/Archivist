@@ -216,7 +216,9 @@ class AsyncInternetArchiveClient:
             },
         )
         raise_for_common_status(
-            cast("ResponseLike", login_response), service=_common.SERVICE
+            cast("ResponseLike", login_response),
+            service=_common.SERVICE,
+            authentication_statuses=frozenset({400, 401, 403}),
         )
         login_data = await async_response_mapping(
             login_response, service=_common.SERVICE
@@ -413,8 +415,11 @@ class AsyncInternetArchiveClient:
                 logger.info("Internet Archive job %s completed", job_id)
                 return current
             if isinstance(current, InternetArchiveFailedStatus):
+                reason_suffix = (
+                    f": {current.message}" if current.message is not None else ""
+                )
                 raise CaptureFailedError(
-                    f"{_common.SERVICE} capture job failed",
+                    f"{_common.SERVICE} capture job failed{reason_suffix}",
                     service=_common.SERVICE,
                     job_id=job_id,
                     service_code=current.service_code,

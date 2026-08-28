@@ -240,6 +240,21 @@ def test_submission_parser_handles_rejection_and_response_fallbacks() -> None:
         )
     assert failure.value.service_code is None
 
+    with pytest.raises(CaptureFailedError) as detailed:
+        _common.parse_submission(
+            {
+                "status": "error",
+                "status_ext": "error:invalid-url-syntax",
+                "message": (
+                    "<strong>URL is invalid</strong> "
+                    "<a href='https://user:password@example.com/help'>Help</a>"
+                ),
+            },
+            target_url="https://x",
+        )
+    assert str(detailed.value).endswith(": URL is invalid Help")
+    assert detailed.value.service_code == "error:invalid-url-syntax"
+
     fallback = _common.parse_submission(
         {"job_id": "job", "url": 4, "message": 5}, target_url="https://fallback"
     )

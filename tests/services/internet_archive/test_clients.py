@@ -249,6 +249,7 @@ def test_cookie_authentication_and_terminal_errors(
             client.wait("pending", timeout=0.2, poll_interval=0.01)
     assert failure.value.job_id == "failed"
     assert failure.value.service_code == "error:cannot-fetch"
+    assert str(failure.value).endswith(": capture failed")
     request = ia_endpoints.matching("/ia/status/user", "GET")[0]
     assert "logged-in-user=test%40example.invalid" in request.headers["Cookie"]
     assert "logged-in-sig=cookie-signature" in request.headers["Cookie"]
@@ -262,7 +263,7 @@ async def test_async_cookie_authentication_and_terminal_errors(
     cookies = InternetArchiveCookies("test%40example.invalid", "cookie-signature")
     async with AsyncInternetArchiveClient(cookies=cookies) as client:
         assert (await client.user_status()).available == AVAILABLE_CAPTURES
-        with pytest.raises(CaptureFailedError):
+        with pytest.raises(CaptureFailedError, match="capture failed"):
             await client.wait("failed", timeout=1, poll_interval=0.001)
         with pytest.raises(PollingTimeoutError):
             await client.wait("pending", timeout=0.2, poll_interval=0.01)

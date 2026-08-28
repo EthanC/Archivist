@@ -35,12 +35,17 @@ class StubResponse:
     """Provide the response attributes consumed by both clients."""
 
     def __init__(
-        self, payload: object, *, headers: dict[str, str] | None = None
+        self,
+        payload: object,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        text: str = "",
     ) -> None:
         """Initialize a successful response around a JSON payload."""
-        self.status_code = 200
+        self.status_code = status_code
         self.headers = headers or {}
-        self.text = ""
+        self.text = text
         self.url = "https://example.invalid"
         self.payload = payload
 
@@ -233,14 +238,31 @@ def test_sync_login_failure_success_and_authentication_shortcuts() -> None:
         InternetArchiveClient(session=as_sync_session(SyncSession())).login()
 
     failed = SyncSession(
-        [StubResponse({"success": True, "value": {"token": "token"}}), StubResponse({})]
+        [
+            StubResponse({"success": True, "value": {"token": "token"}}),
+            StubResponse(
+                {"success": False, "error": "Email and/or password incorrect"},
+                status_code=400,
+                headers={"Content-Type": "application/json"},
+            ),
+        ]
     )
     client = InternetArchiveClient(
         session=as_sync_session(failed),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="login failed"):
+    with pytest.raises(AuthenticationError, match="Email and/or password incorrect"):
         client.login()
+
+    fallback = SyncSession(
+        [StubResponse({"success": True, "value": {"token": "token"}}), StubResponse({})]
+    )
+    fallback_client = InternetArchiveClient(
+        session=as_sync_session(fallback),
+        account=InternetArchiveAccount("user", "password"),
+    )
+    with pytest.raises(AuthenticationError, match="login failed"):
+        fallback_client.login()
 
     session = SyncSession(
         [
@@ -276,14 +298,31 @@ async def test_async_login_failure_success_and_authentication_shortcuts() -> Non
         ).login()
 
     failed = AsyncSession(
-        [StubResponse({"success": True, "value": {"token": "token"}}), StubResponse({})]
+        [
+            StubResponse({"success": True, "value": {"token": "token"}}),
+            StubResponse(
+                {"success": False, "error": "Email and/or password incorrect"},
+                status_code=400,
+                headers={"Content-Type": "application/json"},
+            ),
+        ]
     )
     client = AsyncInternetArchiveClient(
         session=as_async_session(failed),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="login failed"):
+    with pytest.raises(AuthenticationError, match="Email and/or password incorrect"):
         await client.login()
+
+    fallback = AsyncSession(
+        [StubResponse({"success": True, "value": {"token": "token"}}), StubResponse({})]
+    )
+    fallback_client = AsyncInternetArchiveClient(
+        session=as_async_session(fallback),
+        account=InternetArchiveAccount("user", "password"),
+    )
+    with pytest.raises(AuthenticationError, match="login failed"):
+        await fallback_client.login()
 
     session = AsyncSession(
         [

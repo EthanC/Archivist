@@ -242,6 +242,23 @@ def test_sync_client_handles_absence_unexpected_status_and_transport_errors() ->
     with pytest.raises(NetworkError):
         failing.timemap("https://example.com/")
 
+    detailed = ArchiveTodayClient(
+        session=cast(
+            "niquests.Session",
+            StubSession(
+                [
+                    StubResponse(
+                        400,
+                        {"Content-Type": "text/html;charset=utf-8"},
+                        "Invalid Accept-Datetime header `bad`",
+                    )
+                ]
+            ),
+        )
+    )
+    with pytest.raises(InvalidServiceResponseError, match="Invalid Accept-Datetime"):
+        detailed.closest("https://example.com/", datetime(2020, 1, 1, tzinfo=UTC))
+
 
 @pytest.mark.asyncio
 async def test_async_client_handles_absence_unexpected_status_and_errors() -> None:
@@ -265,6 +282,23 @@ async def test_async_client_handles_absence_unexpected_status_and_errors() -> No
     )
     with pytest.raises(NetworkError):
         await failing.timemap("https://example.com/")
+
+    detailed = AsyncArchiveTodayClient(
+        session=cast(
+            "niquests.AsyncSession",
+            AsyncStubSession(
+                [
+                    StubResponse(
+                        400,
+                        {"Content-Type": "text/html;charset=utf-8"},
+                        "Invalid Accept-Datetime header `bad`",
+                    )
+                ]
+            ),
+        )
+    )
+    with pytest.raises(InvalidServiceResponseError, match="Invalid Accept-Datetime"):
+        await detailed.closest("https://example.com/", datetime(2020, 1, 1, tzinfo=UTC))
 
 
 def test_removed_unstable_methods_are_not_exposed() -> None:

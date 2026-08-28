@@ -16,6 +16,7 @@ from archivist.core._http import (
     async_response_text,
     parse_retry_after,
     raise_for_common_status,
+    response_error_reason,
     response_json,
     response_mapping,
     response_text,
@@ -28,6 +29,8 @@ from archivist.core.errors import (
     RateLimitError,
     TLSVerificationError,
 )
+
+MAX_ERROR_REASON_LENGTH = 500
 
 
 class Response:
@@ -59,7 +62,7 @@ class BrokenTextResponse:
     """Provide a response whose text property raises an error."""
 
     status_code = 200
-    headers: Mapping[str, str] = {}
+    headers: Mapping[str, str] = {"Content-Type": "text/plain"}
     url = "https://service.example/api"
 
     @property
@@ -140,6 +143,67 @@ def test_sync_response_decoders_translate_transport_and_shape_errors() -> None:
     assert raised.value.__cause__ is None
 
 
+def test_response_error_reasons_are_bounded_and_sanitized() -> None:
+    """Expose concise service reasons without retaining reflected credentials."""
+    response = Response(
+        {
+            "error": (
+                "<strong>Wrong user@example.com</strong> "
+                "<a href='/forgot?email=user%40example.com'>Forgot password?</a> "
+                "https://user:secret@example.com/private " + "x" * 600
+            )
+        },
+        headers={"content-type": "application/problem+json; charset=utf-8"},
+    )
+    reason = response_error_reason(response)
+    assert reason is not None
+    assert reason.startswith("Wrong <redacted-email> Forgot password?")
+    assert "https://<redacted>@example.com/private" in reason
+    assert "secret" not in reason
+    assert len(reason) == MAX_ERROR_REASON_LENGTH
+
+    assert (
+        response_error_reason(
+            Response(
+                headers={"Content-Type": "text/html;charset=utf-8"},
+                text="Invalid Accept-Datetime header `bad`",
+            )
+        )
+        == "Invalid Accept-Datetime header `bad`"
+    )
+
+
+def test_response_error_reason_ignores_unusable_bodies() -> None:
+    """Fall back to status-only errors when no safe reason can be extracted."""
+    assert response_error_reason(Response(headers={})) is None
+    assert (
+        response_error_reason(
+            Response([], headers={"Content-Type": "application/json"})
+        )
+        is None
+    )
+    assert (
+        response_error_reason(
+            Response({}, headers={"Content-Type": "application/json"})
+        )
+        is None
+    )
+    assert (
+        response_error_reason(
+            Response(
+                ValueError("invalid JSON"),
+                headers={"Content-Type": "application/json"},
+            )
+        )
+        is None
+    )
+    assert response_error_reason(cast("ResponseLike", BrokenTextResponse())) is None
+
+    non_text = Response(headers={"Content-Type": "text/plain"})
+    non_text.text = cast("str", b"not text")
+    assert response_error_reason(non_text) is None
+
+
 @pytest.mark.asyncio
 async def test_async_response_decoders_accept_regular_and_awaitable_values() -> None:
     """Decode regular and awaitable values from asynchronous responses."""
@@ -189,8 +253,16 @@ async def test_async_response_decoders_translate_all_error_paths() -> None:
 def test_common_status_translates_authentication_errors(status_code: int) -> None:
     """Translate authentication HTTP statuses into package errors."""
     with pytest.raises(AuthenticationError) as raised:
-        raise_for_common_status(Response(status_code=status_code), service="Test")
+        raise_for_common_status(
+            Response(
+                {"message": "Credentials are invalid"},
+                status_code=status_code,
+                headers={"Content-Type": "application/json"},
+            ),
+            service="Test",
+        )
     assert raised.value.status_code == status_code
+    assert str(raised.value).endswith(": Credentials are invalid")
 
 
 def test_common_status_translates_rate_limits_and_other_failures() -> None:
@@ -198,13 +270,26 @@ def test_common_status_translates_rate_limits_and_other_failures() -> None:
     expected_retry_seconds = 4.0
     with pytest.raises(RateLimitError) as raised:
         raise_for_common_status(
-            Response(status_code=429, headers={"Retry-After": "4"}), service="Test"
+            Response(
+                status_code=429,
+                headers={"Retry-After": "4", "Content-Type": "text/plain"},
+                text="Slow down",
+            ),
+            service="Test",
         )
     assert raised.value.retry_after == expected_retry_seconds
     assert raised.value.retry_after_raw == "4"
+    assert str(raised.value).endswith(": Slow down")
 
-    with pytest.raises(InvalidServiceResponseError, match="HTTP 500"):
-        raise_for_common_status(Response(status_code=500), service="Test")
+    with pytest.raises(InvalidServiceResponseError, match="HTTP 500: broken"):
+        raise_for_common_status(
+            Response(
+                {"detail": "broken"},
+                status_code=500,
+                headers={"Content-Type": "application/json"},
+            ),
+            service="Test",
+        )
     assert raise_for_common_status(Response(status_code=399), service="Test") is None
 
 

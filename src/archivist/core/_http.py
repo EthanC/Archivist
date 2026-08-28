@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from inspect import isawaitable
 from typing import Any, Protocol, cast
 
@@ -24,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 _HTTP_ERROR_STATUS = 400
 _HTTP_RATE_LIMIT_STATUS = 429
+_AUTHENTICATION_STATUSES = frozenset({401, 403})
+_ERROR_FIELDS = ("error", "message", "detail", "reason")
+_MAX_ERROR_REASON_LENGTH = 500
+_EMAIL_ADDRESS = re.compile(
+    r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\b"
+)
+_URL_USER_INFO = re.compile(r"(?i)(https?://)[^\s/@]+(?::[^\s/@]*)?@")
 
 
 class ResponseLike(Protocol):
@@ -54,6 +65,18 @@ class AsyncTextResponseLike(Protocol):
     text: object
 
 
+class _ErrorTextParser(HTMLParser):
+    """Collect visible text while discarding markup and its attributes."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        """Collect one visible text fragment."""
+        self.parts.append(data)
+
+
 def parse_retry_after(
     headers: Mapping[str, str],
 ) -> tuple[float | datetime | None, str | None]:
@@ -75,6 +98,64 @@ def parse_retry_after(
     if not math.isfinite(seconds):
         return None, raw
     return max(0.0, seconds), raw
+
+
+def sanitize_service_reason(value: object) -> str | None:
+    """Return bounded visible service text without common reflected credentials."""
+    if not isinstance(value, str):
+        return None
+    parser = _ErrorTextParser()
+    parser.feed(value)
+    reason = " ".join(" ".join(parser.parts).split())
+    reason = _URL_USER_INFO.sub(r"\1<redacted>@", reason)
+    reason = _EMAIL_ADDRESS.sub("<redacted-email>", reason)
+    return reason[:_MAX_ERROR_REASON_LENGTH].rstrip() or None
+
+
+def response_error_reason(response: ResponseLike) -> str | None:
+    """Extract a bounded, sanitized reason from a recognized error response."""
+    content_type = next(
+        (
+            value
+            for key, value in response.headers.items()
+            if key.lower() == "content-type"
+        ),
+        "",
+    )
+    media_type = content_type.partition(";")[0].strip().lower()
+    value: object
+    if media_type == "application/json" or media_type.endswith("+json"):
+        try:
+            data = response.json()
+        except (
+            niquests.exceptions.JSONDecodeError,
+            niquests.exceptions.RequestException,
+            NotImplementedError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            return None
+        value = (
+            next(
+                (
+                    data.get(field)
+                    for field in _ERROR_FIELDS
+                    if isinstance(data.get(field), str) and data.get(field)
+                ),
+                None,
+            )
+            if isinstance(data, Mapping)
+            else None
+        )
+    elif media_type.startswith("text/"):
+        try:
+            value = response.text
+        except (niquests.exceptions.RequestException, OSError):
+            return None
+    else:
+        return None
+    return sanitize_service_reason(value)
 
 
 def response_json(response: ResponseLike, *, service: str) -> object:
@@ -192,15 +273,24 @@ async def async_response_text(response: object, *, service: str) -> str:
     return value
 
 
-def raise_for_common_status(response: ResponseLike, *, service: str) -> None:
-    """Translate common HTTP failures without retaining response bodies."""
+def raise_for_common_status(
+    response: ResponseLike,
+    *,
+    service: str,
+    authentication_statuses: frozenset[int] = _AUTHENTICATION_STATUSES,
+) -> None:
+    """Translate common HTTP failures with a sanitized service reason."""
     status_code = response.status_code
-    if status_code in {401, 403}:
+    if status_code < _HTTP_ERROR_STATUS:
+        return
+    reason = response_error_reason(response)
+    reason_suffix = f": {reason}" if reason is not None else ""
+    if status_code in authentication_statuses:
         logger.warning(
             "%s rejected request credentials with HTTP %s", service, status_code
         )
         raise AuthenticationError(
-            f"{service} rejected the request credentials",
+            f"{service} rejected the request credentials{reason_suffix}",
             service=service,
             status_code=status_code,
         )
@@ -208,19 +298,18 @@ def raise_for_common_status(response: ResponseLike, *, service: str) -> None:
         retry_after, raw = parse_retry_after(response.headers)
         logger.warning("%s rate limit reached", service)
         raise RateLimitError(
-            f"{service} rate limit reached",
+            f"{service} rate limit reached{reason_suffix}",
             service=service,
             status_code=status_code,
             retry_after=retry_after,
             retry_after_raw=raw,
         )
-    if status_code >= _HTTP_ERROR_STATUS:
-        logger.warning("%s returned HTTP %s", service, status_code)
-        raise InvalidServiceResponseError(
-            f"{service} returned HTTP {status_code}",
-            service=service,
-            status_code=status_code,
-        )
+    logger.warning("%s returned HTTP %s", service, status_code)
+    raise InvalidServiceResponseError(
+        f"{service} returned HTTP {status_code}{reason_suffix}",
+        service=service,
+        status_code=status_code,
+    )
 
 
 def translate_request_error(exc: BaseException, *, service: str) -> NetworkError:
