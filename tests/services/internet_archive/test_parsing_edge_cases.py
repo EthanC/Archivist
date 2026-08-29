@@ -355,9 +355,11 @@ def test_success_status_supports_optional_fields_and_every_outlink_shape() -> No
         }
     )
     assert cast("InternetArchiveSuccessStatus", absent).duration_seconds is None
+    assert cast("InternetArchiveSuccessStatus", absent).first_archive is None
     assert cast("InternetArchiveSuccessStatus", sequence).outlinks == ("https://one",)
     assert cast("Any", string_map).outlinks["1"] == "https://one"
     assert cast("Any", availability).outlinks["https://one"].timestamp is None
+    assert cast("InternetArchiveSuccessStatus", availability).first_archive is False
 
 
 @pytest.mark.parametrize(

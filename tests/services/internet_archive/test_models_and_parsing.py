@@ -140,6 +140,7 @@ def test_status_parser_supports_pending_success_failure_and_outlink_shapes() -> 
             "original_url": "https://example.com/",
             "timestamp": "20200102030405",
             "duration_sec": 1,
+            "first_archive": True,
             "resources": ["https://example.com/"],
             "outlinks": {"https://example.net/": {"timestamp": "20190102030405"}},
         }
@@ -147,6 +148,7 @@ def test_status_parser_supports_pending_success_failure_and_outlink_shapes() -> 
     assert isinstance(success, InternetArchiveSuccessStatus)
     assert success.timestamp == datetime(2020, 1, 2, 3, 4, 5, tzinfo=UTC)
     assert success.wayback_timestamp == "20200102030405"
+    assert success.first_archive is True
     assert success.archive_url() == (
         "https://web.archive.org/web/20200102030405/https://example.com/"
     )

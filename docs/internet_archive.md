@@ -19,6 +19,7 @@ with InternetArchiveClient() as client:
     capture: InternetArchiveSuccessStatus = client.save("https://example.com/")
 
 print(capture.archive_url())
+print(f"First archive: {capture.first_archive}")
 ```
 
 ::: archivist.services.internet_archive.client

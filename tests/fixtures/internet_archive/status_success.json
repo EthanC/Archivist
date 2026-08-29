@@ -4,6 +4,7 @@
   "original_url": "https://example.com/final",
   "timestamp": "20260823110413",
   "duration_sec": 1.25,
+  "first_archive": true,
   "resources": ["https://example.com/final"],
   "outlinks": {
     "https://example.net/": "child-job"

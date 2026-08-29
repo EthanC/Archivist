@@ -65,6 +65,7 @@ def test_sync_client_exercises_spn_status_and_wayback_apis(
 
     assert isinstance(capture, InternetArchiveSuccessStatus)
     assert capture.original_url == "https://example.com/final"
+    assert capture.first_archive is True
     assert isinstance(batch[0], InternetArchivePendingStatus)
     assert isinstance(batch[1], InternetArchiveFailedStatus)
     assert outlinks[0].job_id == "child"
@@ -101,6 +102,7 @@ async def test_async_client_matches_sync_transport_behavior(
         cdx = await client.search("https://example.com/", show_resume_key=True)
 
     assert isinstance(capture, InternetArchiveSuccessStatus)
+    assert capture.first_archive is True
     assert [item.status for item in batch] == ["pending", "error"]
     assert outlinks[0].job_id == "child"
     assert user.available == AVAILABLE_CAPTURES
