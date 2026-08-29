@@ -191,6 +191,15 @@ def test_status_collection_and_cdx_parsers_accept_documented_variants() -> None:
     )
 
 
+def test_outlink_status_collection_accepts_live_empty_result() -> None:
+    """Treat Save Page Now's no-child-jobs response as an empty collection."""
+    data = {"status": "error", "message": "No job_ids found."}
+
+    assert _common.parse_outlink_status_collection(data) == ()
+    with pytest.raises(InvalidServiceResponseError):
+        _common.parse_status_collection(data)
+
+
 def test_changed_service_shapes_raise_typed_errors() -> None:
     """Raise package errors when service response shapes change."""
     with pytest.raises(InvalidServiceResponseError):

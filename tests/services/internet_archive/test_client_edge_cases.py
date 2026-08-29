@@ -378,6 +378,10 @@ def test_sync_status_validation_authentication_and_public_wrapper() -> None:
     response = StubResponse({"status": "pending", "job_id": "job", "resources": []})
     session.responses.append(response)
     assert client.status("job") == InternetArchivePendingStatus("job")
+    session.responses.append(
+        StubResponse({"status": "error", "message": "No job_ids found."})
+    )
+    assert client.status_outlinks("job") == ()
 
     unauthenticated = InternetArchiveClient(session=as_sync_session(SyncSession()))
     with pytest.raises(AuthenticationError, match="account cookies"):
@@ -404,6 +408,10 @@ async def test_async_status_validation_authentication_and_public_wrapper() -> No
     response = StubResponse({"status": "pending", "job_id": "job", "resources": []})
     session.responses.append(response)
     assert await client.status("job") == InternetArchivePendingStatus("job")
+    session.responses.append(
+        StubResponse({"status": "error", "message": "No job_ids found."})
+    )
+    assert await client.status_outlinks("job") == ()
 
     unauthenticated = AsyncInternetArchiveClient(
         session=as_async_session(AsyncSession())

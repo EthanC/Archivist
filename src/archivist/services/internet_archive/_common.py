@@ -411,6 +411,19 @@ def parse_status_collection(data: object) -> tuple[InternetArchiveCaptureStatus,
     return tuple(parsed)
 
 
+def parse_outlink_status_collection(
+    data: object,
+) -> tuple[InternetArchiveCaptureStatus, ...]:
+    """Parse child-job statuses, including SPN's empty-result response."""
+    if (
+        isinstance(data, Mapping)
+        and data.get("status") == "error"
+        and data.get("message") == "No job_ids found."
+    ):
+        return ()
+    return parse_status_collection(data)
+
+
 @_log_parse_failures
 def parse_user_status(data: Mapping[str, Any]) -> InternetArchiveUserStatus:
     available = data.get("available")

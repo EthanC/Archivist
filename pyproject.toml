@@ -1,6 +1,6 @@
 [project]
 name = "archivist-py"
-version = "1.0.1"
+version = "1.0.2"
 description = "Preserve the web and retrieve archives with a typed Python API."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -337,7 +337,7 @@ class InternetArchiveClient:
             data={"job_id_outlinks": job_id},
         )
         raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
-        return _common.parse_status_collection(
+        return _common.parse_outlink_status_collection(
             response_json(cast("ResponseLike", response), service=_common.SERVICE)
         )
 
