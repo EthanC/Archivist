@@ -201,6 +201,20 @@ def test_account_login_is_lazy_and_my_web_archive_uses_capture_timestamp(
     }
 
 
+def test_my_web_archive_url_uses_authenticated_itemname(
+    ia_endpoints: ServerState,
+) -> None:
+    """Return the public web archive URL for the authenticated account."""
+    with InternetArchiveClient(
+        account=InternetArchiveAccount("account@example.invalid", "password")
+    ) as client:
+        url = client.my_web_archive_url()
+
+    assert url == "https://archive.org/details/@mxtive1/web-archive"
+    request = ia_endpoints.matching("/ia/user", "GET")[0]
+    assert request.query == {"op": ["whoami"]}
+
+
 @pytest.mark.asyncio
 async def test_async_account_login_and_my_web_archive(
     ia_endpoints: ServerState,
@@ -222,6 +236,19 @@ async def test_async_account_login_and_my_web_archive(
     my_archive = ia_endpoints.matching("/ia/mwa", "POST")
     assert len(my_archive) == 1
     assert my_archive[0].headers["Content-Type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_async_my_web_archive_url_uses_authenticated_itemname(
+    ia_endpoints: ServerState,
+) -> None:
+    """Return the public web archive URL from the asynchronous client."""
+    async with AsyncInternetArchiveClient(
+        cookies=InternetArchiveCookies("account%40example.invalid", "signature")
+    ) as client:
+        url = await client.my_web_archive_url()
+
+    assert url == "https://archive.org/details/@mxtive1/web-archive"
 
 
 def test_account_only_login_supplies_both_spn_cookies(

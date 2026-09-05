@@ -52,6 +52,34 @@ def test_credentials_reject_empty_and_invalid_fields(
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": False, "value": {"itemname": "@user"}},
+        {"success": True, "value": None},
+        {"success": True, "value": {"itemname": 1}},
+        {"success": True, "value": {"itemname": "user"}},
+        {"success": True, "value": {"itemname": "@"}},
+    ],
+)
+def test_my_web_archive_url_rejects_invalid_user_details(
+    payload: dict[str, object],
+) -> None:
+    """Reject user responses without a valid account item name."""
+    with pytest.raises(InvalidServiceResponseError):
+        _common.parse_my_web_archive_url(payload)
+
+
+def test_my_web_archive_url_quotes_itemname_path_characters() -> None:
+    """Keep the account item name within one URL path segment."""
+    assert (
+        _common.parse_my_web_archive_url(
+            {"success": True, "value": {"itemname": "@user/name"}}
+        )
+        == "https://archive.org/details/@user%2Fname/web-archive"
+    )
+
+
+@pytest.mark.parametrize(
     "age",
     [True, -1, timedelta(seconds=-1), timedelta(microseconds=1), 1.5, "   "],
 )

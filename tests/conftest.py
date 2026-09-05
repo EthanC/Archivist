@@ -146,6 +146,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
         handled = True
         if path == "/ia/csrf":
             self._json(200, {"success": True, "value": {"token": "test-csrf-token"}})
+        elif path == "/ia/user":
+            self._json(
+                200,
+                {
+                    "success": True,
+                    "value": {
+                        "username": "account@example.invalid",
+                        "itemname": "@mxtive1",
+                        "screenname": "Mxtive",
+                    },
+                },
+            )
         elif path.startswith("/ia/status/") and path not in {
             "/ia/status/user",
             "/ia/status/system",
@@ -386,5 +398,6 @@ def ia_endpoints(
     monkeypatch.setattr(ia_common, "CDX_URL", f"{base}/ia/cdx")
     monkeypatch.setattr(ia_common, "CSRF_URL", f"{base}/ia/csrf")
     monkeypatch.setattr(ia_common, "LOGIN_URL", f"{base}/ia/login")
+    monkeypatch.setattr(ia_common, "USER_INFO_URL", f"{base}/ia/user")
     monkeypatch.setattr(ia_common, "MY_WEB_ARCHIVE_URL", f"{base}/ia/mwa")
     return archive_server

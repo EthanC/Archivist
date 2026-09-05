@@ -507,6 +507,21 @@ class AsyncInternetArchiveClient:
         raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
         logger.info("added Internet Archive job %s to My Web Archive", capture.job_id)
 
+    async def my_web_archive_url(self) -> str:
+        """Return the authenticated account's public web archive URL."""
+        await self._ensure_account_authentication()
+        response = await self._request(
+            "GET",
+            _common.USER_INFO_URL,
+            headers={"Accept": "application/json"},
+            cookies=self._request_cookies(),
+            params={"op": "whoami"},
+        )
+        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        return _common.parse_my_web_archive_url(
+            await async_response_mapping(response, service=_common.SERVICE)
+        )
+
     async def user_status(self) -> InternetArchiveUserStatus:
         """Return the authenticated account's SPN capacity."""
         await self._ensure_api_authentication()

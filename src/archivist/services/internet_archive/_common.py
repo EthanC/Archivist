@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from functools import wraps
 from types import MappingProxyType
 from typing import Any, ParamSpec, TypedDict, TypeVar, cast
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from archivist.core._http import sanitize_service_reason
 from archivist.core.errors import (
@@ -47,7 +47,9 @@ AVAILABILITY_URL = "https://archive.org/wayback/available"
 CDX_URL = "https://web.archive.org/cdx/search/cdx"
 CSRF_URL = "https://archive.org/services/csrf-token"
 LOGIN_URL = "https://archive.org/services/account/login/"
+USER_INFO_URL = "https://archive.org/services/user.php"
 MY_WEB_ARCHIVE_URL = "https://web.archive.org/__wb/web-archive/"
+WEB_ARCHIVE_DETAILS_URL = "https://archive.org/details"
 
 _WAYBACK_TIMESTAMP = re.compile(r"^\d{14}$")
 _ANONYMOUS_JOB_ID = re.compile(r"\bwatchJob\(\s*['\"]([^'\"]+)['\"]\s*,")
@@ -438,6 +440,23 @@ def parse_user_status(data: Mapping[str, Any]) -> InternetArchiveUserStatus:
             f"{SERVICE} returned invalid user status", service=SERVICE
         )
     return InternetArchiveUserStatus(available=available, processing=processing)
+
+
+@_log_parse_failures
+def parse_my_web_archive_url(data: Mapping[str, Any]) -> str:
+    """Build the public web archive URL from an authenticated user response."""
+    value = data.get("value")
+    itemname = value.get("itemname") if isinstance(value, Mapping) else None
+    if (
+        data.get("success") is not True
+        or not isinstance(itemname, str)
+        or not itemname.startswith("@")
+        or len(itemname) == 1
+    ):
+        raise InvalidServiceResponseError(
+            f"{SERVICE} returned invalid authenticated user details", service=SERVICE
+        )
+    return f"{WEB_ARCHIVE_DETAILS_URL}/{quote(itemname, safe='@')}/web-archive"
 
 
 @_log_parse_failures

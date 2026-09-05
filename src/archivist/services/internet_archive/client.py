@@ -475,6 +475,21 @@ class InternetArchiveClient:
         raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
         logger.info("added Internet Archive job %s to My Web Archive", capture.job_id)
 
+    def my_web_archive_url(self) -> str:
+        """Return the authenticated account's public web archive URL."""
+        self._ensure_account_authentication()
+        response = self._request(
+            "GET",
+            _common.USER_INFO_URL,
+            headers={"Accept": "application/json"},
+            cookies=self._request_cookies(),
+            params={"op": "whoami"},
+        )
+        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        return _common.parse_my_web_archive_url(
+            response_mapping(cast("ResponseLike", response), service=_common.SERVICE)
+        )
+
     def user_status(self) -> InternetArchiveUserStatus:
         """Return the authenticated account's SPN capacity."""
         self._ensure_api_authentication()
