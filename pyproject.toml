@@ -1,6 +1,6 @@
 [project]
 name = "archivist-py"
-version = "1.0.2"
+version = "1.1.0"
 description = "Preserve the web and retrieve archives with a typed Python API."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,7 +21,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "niquests>=3.21",
+  "niquests>=3.21.1",
 ]
 
 [project.urls]
@@ -35,14 +35,14 @@ dev = [
   "pytest>=9.1.1",
   "pytest-asyncio>=1.4.0",
   "pytest-cov>=7.1.0",
-  "ruff>=0.16.4",
-  "ty>=0.0.74",
-  "zensical>=0.0.51",
-  "mkdocstrings-python>=2.0.5",
+  "ruff>=0.16.6",
+  "ty>=0.0.78",
+  "zensical>=0.0.59",
+  "mkdocstrings-python>=2.0.8",
 ]
 
 [build-system]
-requires = ["uv_build>=0.8.4,<0.9.0"]
+requires = ["uv_build>=0.12.10,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.coverage.run]
@@ -85,7 +85,7 @@ select = ["A", "ANN", "ASYNC", "B", "C4", "D", "E", "F", "I", "LOG", "N", "PERF"
 convention = "pep257"
 
 [tool.tox]
-requires = ["tox>=4.58.0", "tox-uv>=1.36.0"]
+requires = ["tox>=4.61.2", "tox-uv>=1.36.0"]
 env_list = [
   "3.14",
   "3.13",

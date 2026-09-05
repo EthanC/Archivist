@@ -50,7 +50,7 @@ from archivist.services.internet_archive import (
     InternetArchiveUserStatus,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "ArchiveRecord",
