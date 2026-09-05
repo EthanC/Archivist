@@ -1,5 +1,13 @@
 # Archivist
 
+<p align="center">
+  <a href="https://pypi.org/project/archivist-py/"><img src="https://img.shields.io/pypi/v/archivist-py" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/archivist-py/"><img src="https://img.shields.io/pypi/pyversions/archivist-py" alt="Supported Python versions"></a>
+  <a href="https://github.com/EthanC/Archivist/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ethanc/archivist/ci.yml" alt="Build status"></a>
+  <a href="https://codecov.io/gh/ethanc/archivist"><img src="https://codecov.io/gh/ethanc/archivist/branch/main/graph/badge.svg" alt="Coverage report"></a>
+  <a href="https://pypi.org/project/archivist-py/"><img src="https://img.shields.io/pypi/dm/archivist-py" alt="PyPI downloads"></a>
+</p>
+
 **Preserve the web and retrieve archives with a typed Python API.**
 
 Archivist gives Python applications a consistent interface to the stable APIs
