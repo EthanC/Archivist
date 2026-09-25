@@ -1,6 +1,6 @@
 [project]
 site_name = "Archivist"
-site_description = "Preserve the web and retrieve archives with a typed Python API."
+site_description = "Archive webpages and files with a typed Python API."
 site_url = "https://archivist.e3n.im/"
 site_author = "Ethan C"
 extra_css = ["stylesheets/extra.css"]

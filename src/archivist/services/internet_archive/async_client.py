@@ -6,7 +6,10 @@ import asyncio
 import logging
 import time
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from datetime import datetime
+from http import HTTPStatus
+from pathlib import Path
 from typing import Any, Unpack, cast
 from urllib.parse import quote
 
@@ -30,11 +33,21 @@ from archivist.core.errors import (
     AuthenticationError,
     CaptureFailedError,
     InvalidOptionError,
+    InvalidServiceResponseError,
     NetworkError,
     OptionCombinationError,
     PollingTimeoutError,
+    ServiceError,
 )
-from archivist.services.internet_archive import _common
+from archivist.services.internet_archive import _common, _items
+from archivist.services.internet_archive.item_models import (
+    InternetArchiveRemovalResult,
+    InternetArchiveUploadError,
+    InternetArchiveUploadFile,
+    InternetArchiveUploadFileResult,
+    InternetArchiveUploadOptions,
+    InternetArchiveUploadResult,
+)
 from archivist.services.internet_archive.models import (
     InternetArchiveAccount,
     InternetArchiveApiKey,
@@ -55,7 +68,7 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncInternetArchiveClient:
-    """Asynchronous client for Save Page Now and Wayback APIs."""
+    """Asynchronous client for Wayback APIs and Archive.org items."""
 
     def __init__(
         self,
@@ -166,7 +179,8 @@ class AsyncInternetArchiveClient:
             await self.login()
             return
         raise AuthenticationError(
-            "Internet Archive account cookies are required for My Web Archive",
+            "Internet Archive account cookies are required for My Web Archive "
+            "and item account operations",
             service=_common.SERVICE,
         )
 
@@ -180,7 +194,10 @@ class AsyncInternetArchiveClient:
                 service=_common.SERVICE,
             )
         token_response = await self._request(
-            "GET", _common.CSRF_URL, headers={"Accept": "application/json"}
+            "GET",
+            _common.CSRF_URL,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
         )
         raise_for_common_status(
             cast("ResponseLike", token_response), service=_common.SERVICE
@@ -214,6 +231,7 @@ class AsyncInternetArchiveClient:
                 "remember": "true" if account.remember else "false",
                 "t": token,
             },
+            allow_redirects=False,
         )
         raise_for_common_status(
             cast("ResponseLike", login_response),
@@ -229,6 +247,220 @@ class AsyncInternetArchiveClient:
             )
         self._account_authenticated = True
         logger.info("authenticated an Archive.org account session")
+
+    def _ensure_item_transport(self) -> None:
+        if not isinstance(self._session, niquests.AsyncSession):
+            return
+        # Path-specific mounts can override session.retries, including during login.
+        for adapter in self._session.adapters.values():
+            retries = getattr(adapter, "max_retries", None)
+            if retries is not False and getattr(retries, "total", None) != 0:
+                raise InvalidOptionError(
+                    "Internet Archive item operations require every session adapter "
+                    "to disable retries (total=0 or False)"
+                )
+
+    async def upload(
+        self,
+        files: Path | Iterable[InternetArchiveUploadFile | str | Path],
+        options: InternetArchiveUploadOptions,
+        *,
+        wait: bool = False,
+        timeout: float = 300.0,  # noqa: ASYNC109 - Public polling deadline.
+        poll_interval: float = 2.0,
+    ) -> InternetArchiveUploadResult:
+        """Create a new item and transfer files sequentially, without rollback.
+
+        Accept a single Path or an iterable of paths or upload files, not a bare
+        string or single upload file. Locally opened files are closed on exit.
+        Waiting checks uploader ingest only, not derivatives or public visibility.
+        Service failures after creation starts retain every file outcome.
+        """
+        self._ensure_open()
+        if not isinstance(options, InternetArchiveUploadOptions):
+            raise InvalidOptionError("options must be InternetArchiveUploadOptions")
+        if not isinstance(wait, bool):
+            raise InvalidOptionError("wait must be a boolean")
+        timeout = _common.validate_duration(timeout, name="timeout", allow_zero=False)
+        poll_interval = _common.validate_duration(
+            poll_interval, name="poll_interval", allow_zero=False
+        )
+        async with _items.async_prepare_files(files, options.identifier) as prepared:
+            self._ensure_item_transport()
+            headers = _items.upload_headers(
+                options, sum(file.size for file in prepared)
+            )
+            headers["Content-Type"] = "application/octet-stream"
+            if self._api_key is None:
+                await self._ensure_account_authentication()
+                response = await self._request(
+                    "GET",
+                    _items.UPLOAD_URL,
+                    cookies=self._request_cookies(),
+                    allow_redirects=False,
+                )
+                _items.raise_for_item_status(cast("ResponseLike", response))
+                self._api_key = _items.parse_upload_key(
+                    await async_response_text(response, service=_common.SERVICE)
+                )
+            headers.update(self._headers())
+            response = await self._request(
+                "POST",
+                _items.UPLOAD_API_URL,
+                headers=self._headers(),
+                cookies=self._request_cookies(),
+                files={
+                    "name": (None, "identifierAvailable"),
+                    "identifier": (None, options.identifier),
+                    "findUnique": (None, "0"),
+                },
+                allow_redirects=False,
+            )
+            _items.raise_for_item_status(cast("ResponseLike", response))
+            _items.validate_availability(
+                await async_response_mapping(response, service=_common.SERVICE),
+                options.identifier,
+            )
+            outcomes = [
+                InternetArchiveUploadFileResult(file.name, file.size)
+                for file in prepared
+            ]
+            failed_file = None
+            try:
+                # Availability is advisory; only this create-only PUT claims the ID.
+                response = await self._request(
+                    "PUT",
+                    f"{_items.S3_URL}/{options.identifier}",
+                    headers={
+                        **headers,
+                        "Content-Length": "0",
+                        "x-archive-queue-derive": "0",
+                    },
+                    data=b"",
+                    allow_redirects=False,
+                )
+                _items.raise_for_item_status(cast("ResponseLike", response))
+                if cast("ResponseLike", response).status_code != HTTPStatus.OK or (
+                    await async_response_text(response, service=_common.SERVICE)
+                ):
+                    raise InvalidServiceResponseError(
+                        "Internet Archive did not confirm item creation",
+                        service=_common.SERVICE,
+                        status_code=cast("ResponseLike", response).status_code,
+                    )
+                for index, file in enumerate(prepared):
+                    failed_file = file.name
+                    file_headers = {**headers, "Content-Length": str(file.size)}
+                    if index < len(prepared) - 1:
+                        file_headers["x-archive-queue-derive"] = "0"
+                    response = await self._request(
+                        "PUT",
+                        f"{_items.S3_URL}/{options.identifier}/"
+                        f"{quote(file.name, safe='/')}",
+                        headers=file_headers,
+                        data=_items.AsyncPreparedFile(file),
+                        allow_redirects=False,
+                    )
+                    _items.raise_for_item_status(cast("ResponseLike", response))
+                    if cast("ResponseLike", response).status_code != HTTPStatus.OK or (
+                        await async_response_text(response, service=_common.SERVICE)
+                    ):
+                        raise InvalidServiceResponseError(
+                            "Internet Archive did not confirm file transfer",
+                            service=_common.SERVICE,
+                            status_code=cast("ResponseLike", response).status_code,
+                        )
+                    outcomes[index] = replace(
+                        outcomes[index],
+                        transferred=True,
+                        etag=cast("ResponseLike", response).headers.get("ETag"),
+                    )
+                failed_file = None
+                if wait:
+                    await self._wait_for_upload(
+                        options.identifier,
+                        wait_timeout=timeout,
+                        poll_interval=poll_interval,
+                    )
+            except ServiceError as exc:
+                raise InternetArchiveUploadError(
+                    InternetArchiveUploadResult(options.identifier, tuple(outcomes)),
+                    exc,
+                    failed_file=failed_file,
+                ) from None
+            return InternetArchiveUploadResult(
+                options.identifier, tuple(outcomes), processing_complete=wait
+            )
+
+    async def _wait_for_upload(
+        self, identifier: str, *, wait_timeout: float, poll_interval: float
+    ) -> None:
+        deadline = time.monotonic() + wait_timeout
+        try:
+            async with asyncio.timeout(wait_timeout):
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    try:
+                        response = await self._request(
+                            "GET",
+                            _items.UPLOAD_API_URL,
+                            headers=self._headers(),
+                            cookies=self._request_cookies(),
+                            params={"name": "catalogRows", "identifier": identifier},
+                            request_timeout=remaining,
+                            allow_redirects=False,
+                        )
+                        _items.raise_for_item_status(cast("ResponseLike", response))
+                        complete = _items.parse_catalog(
+                            await async_response_mapping(
+                                response, service=_common.SERVICE
+                            )
+                        )
+                    except NetworkError as exc:
+                        if deadline - time.monotonic() <= 0 or (
+                            exc.cause_type is not None
+                            and "timeout" in exc.cause_type.lower()
+                            and remaining < self._timeout
+                        ):
+                            raise TimeoutError from None
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    if complete:
+                        return
+                    await asyncio.sleep(min(poll_interval, remaining))
+        except TimeoutError:
+            raise PollingTimeoutError(
+                "Internet Archive item ingest did not finish within "
+                f"{wait_timeout:g} seconds",
+                service=_common.SERVICE,
+                job_id=identifier,
+                timeout=wait_timeout,
+            ) from None
+
+    async def remove_items(
+        self, identifiers: Iterable[str], *, comment: str = "Removed with Archivist"
+    ) -> tuple[InternetArchiveRemovalResult, ...]:
+        """Request make_dark for an explicit batch, returning queue acceptance."""
+        self._ensure_open()
+        form = _items.removal_form(identifiers, comment)
+        ids = tuple(form["identifier"].split(","))
+        self._ensure_item_transport()
+        await self._ensure_account_authentication()
+        response = await self._request(
+            "POST",
+            _items.MANAGE_URL,
+            cookies=self._request_cookies(),
+            data=form,
+            allow_redirects=False,
+        )
+        _items.raise_for_item_status(cast("ResponseLike", response))
+        return _items.parse_removal(
+            await async_response_text(response, service=_common.SERVICE), ids
+        )
 
     async def submit(
         self,

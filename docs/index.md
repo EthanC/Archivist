@@ -1,6 +1,6 @@
 # Archivist
 
-Preserve the web and retrieve archives with a typed Python API.
+Archive webpages and files with a typed Python API.
 
 ## Installation
 
@@ -21,7 +21,8 @@ pip install archivist-py
 ## Internet Archive
 
 Capture pages anonymously or provide credentials when using account features
-and restricted save options.
+and restricted save options. Authenticated clients can also upload files as
+Archive.org items and request item removal.
 
 ```py
 from archivist import InternetArchiveClient

@@ -4,6 +4,14 @@ import logging
 
 from archivist.services.internet_archive.async_client import AsyncInternetArchiveClient
 from archivist.services.internet_archive.client import InternetArchiveClient
+from archivist.services.internet_archive.item_models import (
+    InternetArchiveRemovalResult,
+    InternetArchiveUploadError,
+    InternetArchiveUploadFile,
+    InternetArchiveUploadFileResult,
+    InternetArchiveUploadOptions,
+    InternetArchiveUploadResult,
+)
 from archivist.services.internet_archive.models import (
     InternetArchiveAccount,
     InternetArchiveApiKey,
@@ -39,9 +47,15 @@ __all__ = [
     "InternetArchiveFailedStatus",
     "InternetArchiveOutlinkAvailability",
     "InternetArchivePendingStatus",
+    "InternetArchiveRemovalResult",
     "InternetArchiveSaveOptions",
     "InternetArchiveSnapshot",
     "InternetArchiveSuccessStatus",
     "InternetArchiveSystemStatus",
+    "InternetArchiveUploadError",
+    "InternetArchiveUploadFile",
+    "InternetArchiveUploadFileResult",
+    "InternetArchiveUploadOptions",
+    "InternetArchiveUploadResult",
     "InternetArchiveUserStatus",
 ]

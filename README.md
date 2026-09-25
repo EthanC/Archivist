@@ -8,21 +8,16 @@
   <a href="https://pypi.org/project/archivist-py/"><img src="https://img.shields.io/pypi/dm/archivist-py" alt="PyPI downloads"></a>
 </p>
 
-**Preserve the web and retrieve archives with a typed Python API.**
+**Archive webpages and files with a typed Python API.**
 
-Archivist gives Python applications a consistent interface to the stable APIs
-published by [Internet Archive](https://archive.org/) and
-[Archive.today](https://archive.is/). Search capture history, find the version
-nearest a point in time, or submit a page to the Wayback Machine without
-building around each service's response format.
-
-Both synchronous and asynchronous clients are included, with matching models
-and errors.
+Python clients for [Internet Archive](https://archive.org/) and
+[Archive.today](https://archive.is/), with synchronous and asynchronous APIs.
 
 ## Features
 
 - Search Internet Archive's Wayback capture history
 - Save pages through Internet Archive's Save Page Now service
+- Upload files to Internet Archive and request item removal
 - Check capture progress, service availability, and account capacity
 - Browse Archive.today history and find first, latest, or closest captures
 - Use the same models from synchronous and asynchronous code
@@ -72,8 +67,36 @@ with InternetArchiveClient() as client:
 print(capture.archive_url())
 ```
 
-Credentials are optional. Provide them for account features and restricted save
-options such as screenshots, emailed results, and WACZ files.
+Credentials are optional for the Wayback examples above. Provide them for account
+features and restricted save options such as screenshots, emailed results, and
+WACZ files.
+
+Upload a file to a new Internet Archive item using your account:
+
+```python
+from pathlib import Path
+
+from archivist import (
+    InternetArchiveAccount,
+    InternetArchiveClient,
+    InternetArchiveUploadOptions,
+)
+
+account = InternetArchiveAccount("you@example.com", "your-password")
+options = InternetArchiveUploadOptions(
+    identifier="your-unique-item-id",
+    title="Project notes",
+    description="Notes from my project.",
+    subjects=["notes"],
+)
+with InternetArchiveClient(account=account) as client:
+    result = client.upload(Path("notes.txt"), options)
+
+print(result.details_url)
+```
+
+For upload options and item removal, see the
+[Internet Archive guide](https://archivist.e3n.im/internet_archive/#upload-items).
 
 ## Archive.today
 

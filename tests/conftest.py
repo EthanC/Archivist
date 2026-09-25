@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from email import policy
+from email.parser import BytesParser
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -14,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from archivist.services.internet_archive import _common as ia_common
+from archivist.services.internet_archive import _items as ia_items
 
 FIXTURES = Path(__file__).parent / "fixtures"
 IA_SUCCESS_STATUS = json.loads(
@@ -31,6 +35,7 @@ class RecordedRequest:
     headers: dict[str, str]
     form: dict[str, list[str]]
     json: object | None
+    body: bytes = b""
 
 
 @dataclass(slots=True)
@@ -40,6 +45,10 @@ class ServerState:
     base_url: str = ""
     requests: list[RecordedRequest] = field(default_factory=list)
     status_calls: dict[str, int] = field(default_factory=dict)
+    item_buckets: set[str] = field(default_factory=set)
+    item_responses: dict[tuple[str, str], tuple[int, str, dict[str, str]]] = field(
+        default_factory=dict
+    )
 
     def matching(self, path: str, method: str | None = None) -> list[RecordedRequest]:
         """Return requests matching a path and optional HTTP method."""
@@ -80,6 +89,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if "application/x-www-form-urlencoded" in content_type
             else {}
         )
+        if content_type.startswith("multipart/form-data;"):
+            message = BytesParser(policy=policy.default).parsebytes(
+                f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+                + raw_body
+            )
+            for part in message.walk():
+                name = part.get_param("name", header="content-disposition")
+                payload = part.get_payload(decode=True)
+                if isinstance(name, str) and isinstance(payload, bytes):
+                    form.setdefault(name, []).append(
+                        payload.decode(part.get_content_charset() or "utf-8")
+                    )
         json_body: object | None = None
         if "application/json" in content_type and raw_body:
             json_body = json.loads(raw_body)
@@ -90,6 +111,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             headers=dict(self.headers.items()),
             form=form,
             json=json_body,
+            body=raw_body,
         )
         self.state.requests.append(request)
         return request
@@ -134,6 +156,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         """Serve a fixture response for a GET request."""
         request = self._record()
         for handler in (
+            self._handle_item_request,
             self._handle_internet_archive_get,
             self._handle_archive_today_get,
         ):
@@ -304,10 +327,90 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """Serve a fixture response for a POST request."""
         request = self._record()
-        for handler in (self._handle_internet_archive_post,):
+        for handler in (self._handle_item_request, self._handle_internet_archive_post):
             if handler(request):
                 return
         self._send(404, "not found")
+
+    def do_PUT(self) -> None:
+        """Retain binary upload bodies and implement exclusive bucket creation."""
+        request = self._record()
+        if not self._handle_item_request(request):
+            self._send(404, "not found")
+
+    def _handle_item_request(self, request: RecordedRequest) -> bool:  # noqa: PLR0912 - Fixture endpoint dispatch.
+        override = self.state.item_responses.get((request.method, request.path))
+        if override is not None:
+            status, body, headers = override
+            self._send(status, body, headers=dict(headers))
+            return True
+        if request.path == "/ia/upload" and request.method == "GET":
+            args = {
+                "s3user": {"s3accesskey": "dummy-access", "s3secretkey": "dummy-secret"}
+            }
+            self._send(
+                200,
+                '<input type="hidden" class="js-uploader-args" '
+                f'value="{escape(json.dumps(args), quote=True)}">',
+            )
+        elif request.path == "/ia/upload-api":
+            if request.method == "POST":
+                identifier = request.form.get("identifier", [""])[0]
+                self._json(
+                    200,
+                    {
+                        "success": identifier not in self.state.item_buckets,
+                        "identifier": identifier,
+                    },
+                )
+            else:
+                identifier = request.query.get("identifier", [""])[0]
+                key = f"catalog:{identifier}"
+                calls = self.state.status_calls.get(key, 0)
+                self.state.status_calls[key] = calls + 1
+                self._json(
+                    200,
+                    {
+                        "success": True,
+                        "rows": (
+                            [{"cmd": "archive.php", "wait_admin": 0}]
+                            if calls == 0
+                            else []
+                        ),
+                    },
+                )
+        elif request.path.startswith("/ia/s3/") and request.method == "PUT":
+            bucket, separator, _ = request.path.removeprefix("/ia/s3/").partition("/")
+            if not separator:
+                if bucket in self.state.item_buckets:
+                    self._send(409, "<Error><Code>BucketAlreadyExists</Code></Error>")
+                elif request.body:
+                    self._send(400, "bucket creation must have an empty body")
+                else:
+                    self.state.item_buckets.add(bucket)
+                    self._send(200)
+            elif bucket not in self.state.item_buckets:
+                self._send(404, "<Error><Code>NoSuchBucket</Code></Error>")
+            else:
+                self._send(200, headers={"ETag": '"fixture-etag"'})
+        elif request.path == "/ia/manage/" and request.method == "POST":
+            cookie = request.headers.get("Cookie", "")
+            if "logged-in-user=" not in cookie or "logged-in-sig=" not in cookie:
+                self._send(401, "account cookies required")
+            else:
+                identifiers = request.form.get("identifier", [""])[0].split(",")
+                self._send(
+                    200,
+                    "".join(
+                        f"<p>Item: '{escape(identifier)}' queued for "
+                        "&quot;make_dark&quot; "
+                        f"operation - task ID: {index}</p>"
+                        for index, identifier in enumerate(identifiers, start=1)
+                    ),
+                )
+        else:
+            return False
+        return True
 
     def _handle_internet_archive_post(self, request: RecordedRequest) -> bool:
         path = request.path
@@ -400,4 +503,8 @@ def ia_endpoints(
     monkeypatch.setattr(ia_common, "LOGIN_URL", f"{base}/ia/login")
     monkeypatch.setattr(ia_common, "USER_INFO_URL", f"{base}/ia/user")
     monkeypatch.setattr(ia_common, "MY_WEB_ARCHIVE_URL", f"{base}/ia/mwa")
+    monkeypatch.setattr(ia_items, "UPLOAD_URL", f"{base}/ia/upload")
+    monkeypatch.setattr(ia_items, "UPLOAD_API_URL", f"{base}/ia/upload-api")
+    monkeypatch.setattr(ia_items, "S3_URL", f"{base}/ia/s3")
+    monkeypatch.setattr(ia_items, "MANAGE_URL", f"{base}/ia/manage/")
     return archive_server

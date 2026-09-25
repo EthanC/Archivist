@@ -1,4 +1,4 @@
-"""Preserve the web and retrieve archives with a typed Python API."""
+"""Archive webpages and files with a typed Python API."""
 
 from archivist.core import (
     Archiver,
@@ -44,9 +44,15 @@ from archivist.services.internet_archive import (
     InternetArchiveCookies,
     InternetArchiveFailedStatus,
     InternetArchivePendingStatus,
+    InternetArchiveRemovalResult,
     InternetArchiveSaveOptions,
     InternetArchiveSuccessStatus,
     InternetArchiveSystemStatus,
+    InternetArchiveUploadError,
+    InternetArchiveUploadFile,
+    InternetArchiveUploadFileResult,
+    InternetArchiveUploadOptions,
+    InternetArchiveUploadResult,
     InternetArchiveUserStatus,
 )
 
@@ -79,9 +85,15 @@ __all__ = [
     "InternetArchiveCookies",
     "InternetArchiveFailedStatus",
     "InternetArchivePendingStatus",
+    "InternetArchiveRemovalResult",
     "InternetArchiveSaveOptions",
     "InternetArchiveSuccessStatus",
     "InternetArchiveSystemStatus",
+    "InternetArchiveUploadError",
+    "InternetArchiveUploadFile",
+    "InternetArchiveUploadFileResult",
+    "InternetArchiveUploadOptions",
+    "InternetArchiveUploadResult",
     "InternetArchiveUserStatus",
     "InvalidOptionError",
     "InvalidServiceResponseError",
