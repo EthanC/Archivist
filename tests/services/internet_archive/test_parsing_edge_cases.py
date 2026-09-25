@@ -231,6 +231,9 @@ class _NoOffset(tzinfo):
     def dst(self, dt: datetime | None) -> None:
         return None
 
+    def tzname(self, dt: datetime | None) -> None:
+        return None
+
 
 @pytest.mark.parametrize(
     "value", [datetime(2020, 1, 1), datetime(2020, 1, 1, tzinfo=_NoOffset())]
