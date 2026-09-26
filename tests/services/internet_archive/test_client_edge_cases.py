@@ -127,6 +127,50 @@ def key() -> InternetArchiveApiKey:
     return InternetArchiveApiKey("access", "secret")
 
 
+def test_sync_recovery_request_supports_an_injected_transport() -> None:
+    """Preserve isolated recovery fields through the generic session path."""
+    response = StubResponse({})
+    session = SyncSession([response])
+    client = InternetArchiveClient(session=as_sync_session(session), api_key=key())
+    actual = client._recovery_request(
+        "GET", "https://example.invalid/recovery", key(), request_timeout=1
+    )
+    assert actual is response
+    assert session.requests[0][2]["cookies"] == {}
+    assert session.requests[0][2]["auth"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_recovery_request_supports_an_injected_transport() -> None:
+    """Preserve isolated recovery fields through an injected async session."""
+    response = StubResponse({})
+    session = AsyncSession([response])
+    client = AsyncInternetArchiveClient(
+        session=as_async_session(session), api_key=key()
+    )
+    actual = await client._recovery_request(
+        "GET", "https://example.invalid/recovery", key(), request_timeout=1
+    )
+    assert actual is response
+    assert session.requests[0][2]["cookies"] == {}
+    assert session.requests[0][2]["auth"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_recovery_request_translates_injected_transport_type_errors() -> (
+    None
+):
+    """Translate TypeError from the generic async recovery transport path."""
+    session = AsyncSession([TypeError("transport failed")])
+    client = AsyncInternetArchiveClient(
+        session=as_async_session(session), api_key=key()
+    )
+    with pytest.raises(NetworkError):
+        await client._recovery_request(
+            "GET", "https://example.invalid/recovery", key(), request_timeout=1
+        )
+
+
 def test_async_wait_and_save_are_coroutine_functions() -> None:
     """Expose public asynchronous operations as coroutine functions."""
     assert iscoroutinefunction(AsyncInternetArchiveClient.wait)

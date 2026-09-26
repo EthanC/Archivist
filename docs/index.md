@@ -22,7 +22,9 @@ pip install archivist-py
 
 Capture pages anonymously or provide credentials when using account features
 and restricted save options. Authenticated clients can also upload files as
-Archive.org items and request item removal.
+Archive.org items, reconcile interrupted transfers with `get_item()`, recover
+missing files with `add_files()`, and request item removal. Recovery requires
+exact LOW-key ownership, persisted provenance, and matching file checksums.
 
 ```py
 from archivist import InternetArchiveClient

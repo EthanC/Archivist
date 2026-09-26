@@ -7,17 +7,19 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from email import policy
 from email.parser import BytesParser
+from hashlib import md5, sha1
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
 from archivist.services.internet_archive import _common as ia_common
 from archivist.services.internet_archive import _items as ia_items
+from archivist.services.internet_archive import _recovery as ia_recovery
 
 FIXTURES = Path(__file__).parent / "fixtures"
 IA_SUCCESS_STATUS = json.loads(
@@ -46,6 +48,9 @@ class ServerState:
     requests: list[RecordedRequest] = field(default_factory=list)
     status_calls: dict[str, int] = field(default_factory=dict)
     item_buckets: set[str] = field(default_factory=set)
+    item_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
+    item_files: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    item_snapshots: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     item_responses: dict[tuple[str, str], tuple[int, str, dict[str, str]]] = field(
         default_factory=dict
     )
@@ -338,7 +343,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if not self._handle_item_request(request):
             self._send(404, "not found")
 
-    def _handle_item_request(self, request: RecordedRequest) -> bool:  # noqa: PLR0912 - Fixture endpoint dispatch.
+    def _handle_item_request(self, request: RecordedRequest) -> bool:  # noqa: PLR0912,PLR0915 - Fixture endpoint dispatch.
         override = self.state.item_responses.get((request.method, request.path))
         if override is not None:
             status, body, headers = override
@@ -353,6 +358,36 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 '<input type="hidden" class="js-uploader-args" '
                 f'value="{escape(json.dumps(args), quote=True)}">',
             )
+        elif request.path.startswith("/ia/metadata/") and request.method == "GET":
+            identifier = unquote(request.path.removeprefix("/ia/metadata/"))
+            snapshots = self.state.item_snapshots.get(identifier)
+            if snapshots:
+                snapshot = snapshots[0]
+                if len(snapshots) > 1:
+                    snapshots.pop(0)
+                self._json(200, snapshot)
+            elif identifier in self.state.item_metadata:
+                stored = self.state.item_files.get(identifier, {})
+                self._json(
+                    200,
+                    {
+                        "metadata": self.state.item_metadata[identifier],
+                        "files": [
+                            {
+                                "name": name,
+                                "source": "original",
+                                "size": str(len(body)),
+                                "md5": md5(body, usedforsecurity=False).hexdigest(),
+                                "sha1": sha1(body, usedforsecurity=False).hexdigest(),
+                            }
+                            for name, body in stored.items()
+                        ],
+                        "files_count": len(stored),
+                        "workable_servers": ["fixture"],
+                    },
+                )
+            else:
+                self._json(200, {})
         elif request.path == "/ia/upload-api":
             if request.method == "POST":
                 identifier = request.form.get("identifier", [""])[0]
@@ -392,6 +427,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             elif bucket not in self.state.item_buckets:
                 self._send(404, "<Error><Code>NoSuchBucket</Code></Error>")
             else:
+                name = unquote(request.path.removeprefix(f"/ia/s3/{bucket}/"))
+                self.state.item_files.setdefault(bucket, {})[name] = request.body
                 self._send(200, headers={"ETag": '"fixture-etag"'})
         elif request.path == "/ia/manage/" and request.method == "POST":
             cookie = request.headers.get("Cookie", "")
@@ -507,4 +544,5 @@ def ia_endpoints(
     monkeypatch.setattr(ia_items, "UPLOAD_API_URL", f"{base}/ia/upload-api")
     monkeypatch.setattr(ia_items, "S3_URL", f"{base}/ia/s3")
     monkeypatch.setattr(ia_items, "MANAGE_URL", f"{base}/ia/manage/")
+    monkeypatch.setattr(ia_recovery, "METADATA_URL", f"{base}/ia/metadata")
     return archive_server

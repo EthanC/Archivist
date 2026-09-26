@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime
@@ -39,8 +39,16 @@ from archivist.core.errors import (
     PollingTimeoutError,
     ServiceError,
 )
-from archivist.services.internet_archive import _common, _items
+from archivist.services.internet_archive import _common, _items, _recovery
 from archivist.services.internet_archive.item_models import (
+    InternetArchiveChecksumState,
+    InternetArchiveFileDisposition,
+    InternetArchiveItem,
+    InternetArchiveRecoveryDeferredError,
+    InternetArchiveRecoveryError,
+    InternetArchiveRecoveryFileResult,
+    InternetArchiveRecoveryPhase,
+    InternetArchiveRecoveryResult,
     InternetArchiveRemovalResult,
     InternetArchiveUploadError,
     InternetArchiveUploadFile,
@@ -257,6 +265,414 @@ class InternetArchiveClient:
                     "Internet Archive item operations require every session adapter "
                     "to disable retries (total=0 or False)"
                 )
+
+    def _recovery_request(  # noqa: PLR0913 - Explicit request security fields.
+        self,
+        method: str,
+        url: str,
+        key: InternetArchiveApiKey,
+        *,
+        request_timeout: float,
+        mutation: bool = False,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, str] | None = None,
+        data: Any = None,  # noqa: ANN401 - Niquests accepts heterogeneous bodies.
+    ) -> niquests.Response:
+        """Send an identity-isolated recovery request, with one mutation attempt."""
+        self._ensure_open()
+        explicit_headers = {
+            "Accept": "application/json",
+            "Authorization": f"LOW {key.access_key}:{key.secret_key}",
+            **dict(headers or {}),
+        }
+        effective_timeout = min(self._timeout, request_timeout)
+        logger.debug("%s %s", method, sanitize_url_for_log(url))
+        try:
+            if isinstance(self._session, niquests.Session):
+                request = niquests.Request(
+                    method=method,
+                    url=url,
+                    headers=explicit_headers,
+                    params=dict(params or {}),
+                    data=data,
+                    cookies={},
+                    auth=None,
+                    hooks={},
+                ).prepare()
+                assert request.url is not None
+                settings = self._session.merge_environment_settings(
+                    request.url, {}, False, None, None
+                )
+                send_options: dict[str, object] = {
+                    "timeout": effective_timeout,
+                    **settings,
+                }
+                if mutation:
+                    # Session.send retries adapter TypeError once. Calling the
+                    # adapter directly keeps an uncertain PUT strictly one-shot.
+                    response = cast("Any", self._session.get_adapter(request.url)).send(
+                        request, **send_options
+                    )
+                else:
+                    response = self._session.send(
+                        request, allow_redirects=False, **send_options
+                    )
+                    self._session.gather(response)
+                return response
+            return self._request(
+                method,
+                url,
+                request_timeout=request_timeout,
+                headers=explicit_headers,
+                params=dict(params or {}),
+                data=data,
+                cookies={},
+                auth=None,
+                hooks={},
+                allow_redirects=False,
+            )
+        except (niquests.exceptions.RequestException, OSError, TypeError) as exc:
+            error = translate_request_error(exc, service=_common.SERVICE)
+        raise error from None
+
+    def get_item(self, identifier: str) -> InternetArchiveItem:
+        """Return one typed Metadata API snapshot without mutating the item."""
+        _items._validate_identifier(identifier)
+        response = self._request(
+            "GET",
+            f"{_recovery.METADATA_URL}/{identifier}",
+            params={"extended_err": "1"},
+            allow_redirects=False,
+        )
+        typed_response = cast("ResponseLike", response)
+        if typed_response.status_code in {401, 403, 429} or (
+            HTTPStatus.MULTIPLE_CHOICES
+            <= typed_response.status_code
+            < HTTPStatus.BAD_REQUEST
+        ):
+            _items.raise_for_item_status(typed_response)
+        data = response_mapping(typed_response, service=_common.SERVICE)
+        return _recovery.parse_item(
+            data, identifier, status_code=typed_response.status_code
+        )
+
+    def _recovery_key(self) -> InternetArchiveApiKey:
+        """Resolve and return the LOW pair that remains pinned for one operation."""
+        if self._api_key is None:
+            self._ensure_account_authentication()
+            response = self._request(
+                "GET",
+                _items.UPLOAD_URL,
+                cookies=self._request_cookies(),
+                allow_redirects=False,
+            )
+            _items.raise_for_item_status(cast("ResponseLike", response))
+            self._api_key = _items.parse_upload_key(
+                response_text(cast("ResponseLike", response), service=_common.SERVICE)
+            )
+        return self._api_key
+
+    def add_files(  # noqa: PLR0912,PLR0913,PLR0915 - Recovery state machine.
+        self,
+        identifier: str,
+        files: Path | Iterable[InternetArchiveUploadFile | str | Path],
+        *,
+        expected_metadata: Mapping[str, str | Sequence[str]],
+        wait: bool = False,
+        timeout: float = 300.0,
+        poll_interval: float = 2.0,
+    ) -> InternetArchiveRecoveryResult:
+        """Recover missing files on an owned item after conservative reconciliation.
+
+        Sources are hashed before network access and must remain unchanged until
+        return. One deadline covers readiness, inter-file checks, ingest, and
+        checksum verification. A synchronous response can still exceed the
+        deadline while continuously delivering data.
+        """
+        self._ensure_open()
+        if not isinstance(wait, bool):
+            raise InvalidOptionError("wait must be a boolean")
+        timeout = _common.validate_duration(timeout, name="timeout", allow_zero=False)
+        poll_interval = _common.validate_duration(
+            poll_interval, name="poll_interval", allow_zero=False
+        )
+        expected = _recovery.normalize_expected_metadata(expected_metadata)
+        with ExitStack() as stack:
+            source_files = _items.prepare_files(files, identifier, stack)
+            prepared = _recovery.hash_prepared_files(source_files)
+            self._ensure_item_transport()
+            outcomes = [
+                InternetArchiveRecoveryFileResult(
+                    file.name, file.size, file.md5, file.sha1
+                )
+                for file in prepared
+            ]
+            deadline = time.monotonic() + timeout
+
+            def result(
+                *, processing: bool = False, verification: bool = False
+            ) -> InternetArchiveRecoveryResult:
+                return InternetArchiveRecoveryResult(
+                    identifier,
+                    tuple(outcomes),
+                    processing_complete=processing,
+                    verification_complete=verification,
+                )
+
+            def fail(
+                cause: ServiceError,
+                phase: InternetArchiveRecoveryPhase,
+                *,
+                deferred: bool = False,
+                failed_file: str | None = None,
+            ) -> None:
+                if deferred:
+                    raise InternetArchiveRecoveryDeferredError(
+                        result(), cause, phase=phase
+                    ) from None
+                raise InternetArchiveRecoveryError(
+                    result(), cause, phase=phase, failed_file=failed_file
+                ) from None
+
+            def remaining(phase: InternetArchiveRecoveryPhase) -> float:
+                value = deadline - time.monotonic()
+                if value <= 0:
+                    raise PollingTimeoutError(
+                        "Internet Archive file recovery did not finish within "
+                        f"{timeout:g} seconds",
+                        service=_common.SERVICE,
+                        job_id=identifier,
+                        timeout=timeout,
+                    )
+                return value
+
+            try:
+                key = self._recovery_key()
+                response = self._recovery_request(
+                    "GET",
+                    _common.USER_INFO_URL,
+                    key,
+                    request_timeout=remaining(InternetArchiveRecoveryPhase.OWNERSHIP),
+                    params={"op": "whoami"},
+                )
+                _items.raise_for_item_status(cast("ResponseLike", response))
+                identity = _recovery.parse_identity(
+                    response_mapping(
+                        cast("ResponseLike", response), service=_common.SERVICE
+                    )
+                )
+            except ServiceError as exc:
+                fail(exc, InternetArchiveRecoveryPhase.OWNERSHIP)
+
+            while True:
+                phase = InternetArchiveRecoveryPhase.RECONCILIATION
+                try:
+                    request_timeout = remaining(phase)
+                    metadata_response = self._recovery_request(
+                        "GET",
+                        f"{_recovery.METADATA_URL}/{identifier}",
+                        key,
+                        request_timeout=request_timeout,
+                        params={"extended_err": "1"},
+                    )
+                    typed_metadata = cast("ResponseLike", metadata_response)
+                    if typed_metadata.status_code in {401, 403, 429} or (
+                        HTTPStatus.MULTIPLE_CHOICES
+                        <= typed_metadata.status_code
+                        < HTTPStatus.BAD_REQUEST
+                    ):
+                        _items.raise_for_item_status(typed_metadata)
+                    item = _recovery.parse_item(
+                        response_mapping(
+                            cast("ResponseLike", metadata_response),
+                            service=_common.SERVICE,
+                        ),
+                        identifier,
+                        status_code=typed_metadata.status_code,
+                    )
+                    phase = InternetArchiveRecoveryPhase.INGEST
+                    catalog_response = self._recovery_request(
+                        "GET",
+                        _items.UPLOAD_API_URL,
+                        key,
+                        request_timeout=remaining(InternetArchiveRecoveryPhase.INGEST),
+                        params={"name": "catalogRows", "identifier": identifier},
+                    )
+                    _items.raise_for_item_status(cast("ResponseLike", catalog_response))
+                    catalog_complete = _items.parse_catalog(
+                        response_mapping(
+                            cast("ResponseLike", catalog_response),
+                            service=_common.SERVICE,
+                        )
+                    )
+                    phase = InternetArchiveRecoveryPhase.RECONCILIATION
+                    decision = _recovery.reconcile(
+                        item,
+                        identity,
+                        expected,
+                        prepared,
+                        catalog_complete=catalog_complete,
+                    )
+                except _recovery.RecoveryDecisionError as exc:
+                    for index, outcome in enumerate(outcomes):
+                        if outcome.name not in exc.files or (
+                            outcome.transferred and not exc.checksum_mismatch
+                        ):
+                            continue
+                        disposition = (
+                            InternetArchiveFileDisposition.DEFERRED
+                            if exc.deferred
+                            else InternetArchiveFileDisposition.CONFLICTING
+                        )
+                        checksum = (
+                            InternetArchiveChecksumState.MISMATCH
+                            if exc.checksum_mismatch
+                            else InternetArchiveChecksumState.PENDING
+                            if exc.deferred
+                            else outcome.checksum_state
+                        )
+                        outcomes[index] = replace(
+                            outcome,
+                            disposition=disposition,
+                            checksum_state=checksum,
+                        )
+                    if not exc.deferred:
+                        fail(ServiceError(str(exc), service=_common.SERVICE), exc.phase)
+                    if not wait:
+                        fail(
+                            ServiceError(str(exc), service=_common.SERVICE),
+                            exc.phase,
+                            deferred=True,
+                        )
+                    try:
+                        delay = min(poll_interval, remaining(exc.phase))
+                    except ServiceError as deadline_error:
+                        fail(deadline_error, exc.phase)
+                    time.sleep(delay)
+                    continue
+                except ServiceError as exc:
+                    fail(exc, phase)
+
+                unresolved_transfers = [
+                    outcome.name
+                    for outcome in outcomes
+                    if outcome.transferred
+                    and decision.dispositions[outcome.name]
+                    is not InternetArchiveFileDisposition.ALREADY_MATCHING
+                ]
+                if unresolved_transfers:
+                    if wait:
+                        try:
+                            delay = min(
+                                poll_interval,
+                                remaining(InternetArchiveRecoveryPhase.VERIFICATION),
+                            )
+                        except ServiceError as deadline_error:
+                            fail(
+                                deadline_error,
+                                InternetArchiveRecoveryPhase.VERIFICATION,
+                            )
+                        time.sleep(delay)
+                        continue
+                    for index, outcome in enumerate(outcomes):
+                        if outcome.name in unresolved_transfers:
+                            outcomes[index] = replace(
+                                outcome,
+                                disposition=InternetArchiveFileDisposition.UNCERTAIN,
+                            )
+                    fail(
+                        ServiceError(
+                            "an acknowledged transfer is not yet reconcilable",
+                            service=_common.SERVICE,
+                        ),
+                        InternetArchiveRecoveryPhase.VERIFICATION,
+                        deferred=True,
+                    )
+
+                for index, outcome in enumerate(outcomes):
+                    if outcome.transferred:
+                        outcomes[index] = replace(
+                            outcome,
+                            checksum_state=InternetArchiveChecksumState.VERIFIED,
+                        )
+                        continue
+                    disposition = decision.dispositions[outcome.name]
+                    outcomes[index] = replace(
+                        outcome,
+                        disposition=disposition,
+                        checksum_state=(
+                            InternetArchiveChecksumState.VERIFIED
+                            if disposition
+                            is InternetArchiveFileDisposition.ALREADY_MATCHING
+                            else InternetArchiveChecksumState.UNVERIFIED
+                        ),
+                    )
+                missing = [
+                    file
+                    for file in prepared
+                    if decision.dispositions[file.name]
+                    is InternetArchiveFileDisposition.UNATTEMPTED
+                ]
+                if not missing:
+                    verified = all(
+                        outcome.checksum_state is InternetArchiveChecksumState.VERIFIED
+                        for outcome in outcomes
+                    )
+                    return result(processing=wait, verification=verified)
+
+                current = missing[0]
+                current_index = next(
+                    index
+                    for index, outcome in enumerate(outcomes)
+                    if outcome.name == current.name
+                )
+                headers = {
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(current.size),
+                }
+                if len(missing) > 1:
+                    headers["x-archive-queue-derive"] = "0"
+                current.rewind()
+                try:
+                    request_timeout = remaining(InternetArchiveRecoveryPhase.TRANSFER)
+                    outcomes[current_index] = replace(
+                        outcomes[current_index],
+                        disposition=InternetArchiveFileDisposition.UNCERTAIN,
+                        checksum_state=InternetArchiveChecksumState.PENDING,
+                    )
+                    response = self._recovery_request(
+                        "PUT",
+                        f"{_items.S3_URL}/{identifier}/{quote(current.name, safe='/')}",
+                        key,
+                        request_timeout=request_timeout,
+                        mutation=True,
+                        headers=headers,
+                        data=current.file,
+                    )
+                    _items.raise_for_item_status(cast("ResponseLike", response))
+                    if response.status_code != HTTPStatus.OK or response_text(
+                        cast("ResponseLike", response), service=_common.SERVICE
+                    ):
+                        raise InvalidServiceResponseError(
+                            "Internet Archive did not confirm file recovery",
+                            service=_common.SERVICE,
+                            status_code=response.status_code,
+                        )
+                except ServiceError as exc:
+                    fail(
+                        exc,
+                        InternetArchiveRecoveryPhase.TRANSFER,
+                        failed_file=current.name,
+                    )
+                outcomes[current_index] = replace(
+                    outcomes[current_index],
+                    disposition=InternetArchiveFileDisposition.TRANSFERRED,
+                    checksum_state=InternetArchiveChecksumState.PENDING,
+                    transferred=True,
+                    etag=response.headers.get("ETag"),
+                )
+                if not wait and len(missing) == 1:
+                    return result()
 
     def upload(
         self,

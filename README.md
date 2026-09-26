@@ -17,7 +17,7 @@ Python clients for [Internet Archive](https://archive.org/) and
 
 - Search Internet Archive's Wayback capture history
 - Save pages through Internet Archive's Save Page Now service
-- Upload files to Internet Archive and request item removal
+- Upload files to Internet Archive, recover interrupted transfers, and request item removal
 - Check capture progress, service availability, and account capacity
 - Browse Archive.today history and find first, latest, or closest captures
 - Use the same models from synchronous and asynchronous code
@@ -95,7 +95,10 @@ with InternetArchiveClient(account=account) as client:
 print(result.details_url)
 ```
 
-For upload options and item removal, see the
+Uploads are create-only. Interrupted transfers can be reconciled with
+`get_item()` and recovered explicitly with `add_files()` after exact ownership,
+provenance, filename, size, MD5, and SHA-1 checks. For upload recovery, options,
+and item removal, see the
 [Internet Archive guide](https://archivist.e3n.im/internet_archive/#upload-items).
 
 ## Archive.today

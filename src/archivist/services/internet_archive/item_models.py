@@ -6,9 +6,10 @@ import datetime
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
-from typing import BinaryIO
+from typing import BinaryIO, TypeAlias
 from unicodedata import category
 
 from archivist.core.errors import (
@@ -52,6 +53,65 @@ _RESERVED_METADATA = frozenset(
     }
 )
 
+InternetArchiveMetadataValue: TypeAlias = str | tuple[str, ...]
+
+
+class InternetArchiveItemAvailability(StrEnum):
+    """The visibility state established by one metadata response."""
+
+    AVAILABLE = "available"
+    PENDING = "pending"
+    UNAVAILABLE = "unavailable"
+    UNCERTAIN = "uncertain"
+
+
+class InternetArchiveItemFileSource(StrEnum):
+    """The server-reported or filename-derived source of an item file."""
+
+    ORIGINAL = "original"
+    DERIVATIVE = "derivative"
+    GENERATED = "generated"
+    UNKNOWN = "unknown"
+
+
+class InternetArchiveItemTaskState(StrEnum):
+    """A normalized item task state without treating unknown states as success."""
+
+    PENDING = "pending"
+    COMPLETE = "complete"
+    ERROR = "error"
+    UNKNOWN = "unknown"
+
+
+class InternetArchiveFileDisposition(StrEnum):
+    """The outcome of one file in an explicit recovery call."""
+
+    TRANSFERRED = "transferred"
+    ALREADY_MATCHING = "already_matching"
+    UNATTEMPTED = "unattempted"
+    CONFLICTING = "conflicting"
+    DEFERRED = "deferred"
+    UNCERTAIN = "uncertain"
+
+
+class InternetArchiveChecksumState(StrEnum):
+    """Whether server checksums have verified the prepared source bytes."""
+
+    UNVERIFIED = "unverified"
+    PENDING = "pending"
+    VERIFIED = "verified"
+    MISMATCH = "mismatch"
+
+
+class InternetArchiveRecoveryPhase(StrEnum):
+    """The recovery phase in which an operation stopped."""
+
+    OWNERSHIP = "ownership"
+    RECONCILIATION = "reconciliation"
+    TRANSFER = "transfer"
+    INGEST = "ingest"
+    VERIFICATION = "verification"
+
 
 def _validate_text(value: object, name: str, *, multiline: bool = False) -> str:
     """Require nonblank Unicode text without controls or surrogate code points."""
@@ -94,6 +154,100 @@ def _text_values(values: list[str], name: str, *, multiline: bool = False) -> li
     if not result:
         raise InvalidOptionError(f"{name} cannot be empty")
     return [_validate_text(value, name, multiline=multiline) for value in result]
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveItemFile:
+    """One exact filename and its optional server-maintained checksums."""
+
+    name: str
+    size: int | None = None
+    md5: str | None = None
+    sha1: str | None = None
+    source: InternetArchiveItemFileSource = InternetArchiveItemFileSource.UNKNOWN
+    source_value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveItemTask:
+    """One server task, retaining its raw state and operator-facing error."""
+
+    command: str
+    state: InternetArchiveItemTaskState
+    raw_state: str | None = None
+    wait_admin: int | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveItem:
+    """A read-only snapshot returned by the Archive.org Metadata API.
+
+    Empty or incomplete responses are represented as uncertain snapshots. They
+    are never interpreted as permission to create or mutate an item.
+    """
+
+    identifier: str
+    metadata: Mapping[str, InternetArchiveMetadataValue] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    uploader: str | None = None
+    files: tuple[InternetArchiveItemFile, ...] = ()
+    tasks: tuple[InternetArchiveItemTask, ...] = ()
+    availability: InternetArchiveItemAvailability = (
+        InternetArchiveItemAvailability.UNCERTAIN
+    )
+    listing_complete: bool = False
+    has_redrow: bool = False
+    is_dark: bool = False
+    nodownload: bool = False
+    server_unavailable: bool = False
+    workable_servers: tuple[str, ...] = ()
+    extended_error_code: str | None = None
+    unavailable_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Freeze all response containers without inventing missing values."""
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(self, "files", tuple(self.files))
+        object.__setattr__(self, "tasks", tuple(self.tasks))
+        object.__setattr__(self, "workable_servers", tuple(self.workable_servers))
+
+    @property
+    def original_files(self) -> tuple[InternetArchiveItemFile, ...]:
+        """Return original files while retaining every file in ``files``."""
+        return tuple(
+            file
+            for file in self.files
+            if file.source is InternetArchiveItemFileSource.ORIGINAL
+        )
+
+    @property
+    def pending_tasks(self) -> tuple[InternetArchiveItemTask, ...]:
+        """Return tasks that are pending or have an unrecognized state."""
+        return tuple(
+            task
+            for task in self.tasks
+            if task.state
+            in {
+                InternetArchiveItemTaskState.PENDING,
+                InternetArchiveItemTaskState.UNKNOWN,
+            }
+        )
+
+    @property
+    def error_tasks(self) -> tuple[InternetArchiveItemTask, ...]:
+        """Return tasks requiring operator intervention."""
+        return tuple(
+            task
+            for task in self.tasks
+            if task.state is InternetArchiveItemTaskState.ERROR
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return whether this response establishes a usable item snapshot."""
+        return self.availability is InternetArchiveItemAvailability.AVAILABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +401,43 @@ class InternetArchiveUploadResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InternetArchiveRecoveryFileResult:
+    """One explicit file-recovery outcome and its checksum verification state."""
+
+    name: str
+    size: int
+    md5: str
+    sha1: str
+    disposition: InternetArchiveFileDisposition = (
+        InternetArchiveFileDisposition.UNATTEMPTED
+    )
+    checksum_state: InternetArchiveChecksumState = (
+        InternetArchiveChecksumState.UNVERIFIED
+    )
+    transferred: bool = False
+    etag: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveRecoveryResult:
+    """Per-file recovery outcomes, separate from ingest and verification."""
+
+    identifier: str
+    files: tuple[InternetArchiveRecoveryFileResult, ...]
+    processing_complete: bool = False
+    verification_complete: bool = False
+
+    def __post_init__(self) -> None:
+        """Copy file outcomes into an immutable tuple."""
+        object.__setattr__(self, "files", tuple(self.files))
+
+    @property
+    def details_url(self) -> str:
+        """Return the Archive.org item page URL."""
+        return f"https://archive.org/details/{self.identifier}"
+
+
+@dataclass(frozen=True, slots=True)
 class InternetArchiveRemovalResult:
     """Queue acceptance for make_dark, not confirmation of darkness or erasure."""
 
@@ -278,3 +469,48 @@ class InternetArchiveUploadError(ServiceError):
         self.result = result
         self.cause = cause
         self.failed_file = failed_file
+
+
+class InternetArchiveRecoveryError(ServiceError):
+    """A recovery failure retaining exact per-file and service context."""
+
+    def __init__(
+        self,
+        result: InternetArchiveRecoveryResult,
+        cause: ServiceError,
+        *,
+        phase: InternetArchiveRecoveryPhase,
+        failed_file: str | None = None,
+    ) -> None:
+        """Retain the safe cause, failed filename, and failure phase."""
+        super().__init__(
+            "Internet Archive file recovery failed",
+            service="Internet Archive",
+            status_code=cause.status_code,
+        )
+        self.result = result
+        self.cause = cause
+        self.phase = phase
+        self.failed_file = failed_file
+
+
+class InternetArchiveRecoveryDeferredError(InternetArchiveRecoveryError):
+    """A read-only deferral raised when current state cannot authorize writes."""
+
+    def __init__(
+        self,
+        result: InternetArchiveRecoveryResult,
+        cause: ServiceError,
+        *,
+        phase: InternetArchiveRecoveryPhase,
+    ) -> None:
+        """Retain the unresolved phase without implying that a write occurred."""
+        super().__init__(result, cause, phase=phase)
+        self.args = ("Internet Archive file recovery was deferred",)
+
+
+# ``add_files`` aliases make the operation-specific names available while the
+# recovery names remain useful when reconciling an interrupted earlier call.
+InternetArchiveAddFilesFileResult = InternetArchiveRecoveryFileResult
+InternetArchiveAddFilesResult = InternetArchiveRecoveryResult
+InternetArchiveAddFilesError = InternetArchiveRecoveryError

@@ -68,6 +68,7 @@ options = InternetArchiveUploadOptions(
     test_item=True,
     metadata={
         "source": "https://example.com/original",
+        "operation": "persisted-operation-id",
         "custom_key": ["first value", "second value"],
     },
 )
@@ -279,6 +280,86 @@ operation. A creation conflict must never trigger cleanup of a preexisting item.
 A later file-transfer conflict does not rule out creation by this operation;
 cleanup still requires independent ownership proof.
 
+### Recover interrupted file transfers
+
+`upload()` remains create-only. Use `get_item()` for a read-only snapshot and
+`add_files()` only after an interrupted upload has left an item owned by the
+same LOW key account. Persist the identifier, source marker, operation marker,
+and intended files before the first upload attempt. The marker must already be
+part of the initial item metadata; recovery never writes metadata.
+
+```python
+from pathlib import Path
+
+from archivist import (
+    InternetArchiveFileDisposition,
+    InternetArchiveRecoveryDeferredError,
+)
+
+expected = {
+    "source": options.metadata["source"],
+    "operation": options.metadata["operation"],
+}
+
+with InternetArchiveClient(account=account) as client:
+    snapshot = client.get_item(options.identifier)
+    print(snapshot.availability, [file.name for file in snapshot.original_files])
+
+    try:
+        recovered = client.add_files(
+            options.identifier,
+            [Path("example.txt"), Path("supplement.bin")],
+            expected_metadata=expected,
+            wait=True,
+            timeout=600,
+            poll_interval=5,
+        )
+    except InternetArchiveRecoveryDeferredError as error:
+        for file in error.result.files:
+            print(file.name, file.disposition)
+        raise  # Retry only after another read-only reconciliation.
+
+for file in recovered.files:
+    if file.disposition is InternetArchiveFileDisposition.TRANSFERRED:
+        print("acknowledged by this call", file.name, file.etag)
+```
+
+`expected_metadata` is required and nonempty. Scalar and repeated values must
+match the complete stored value. The client does not trim values, treat a list
+member as the whole value, or normalize URLs. The account identity returned by
+`services/user.php?op=whoami` for the pinned LOW key pair must exactly match
+`metadata.uploader`. Configured account text, cookies, and general write access
+do not substitute for that check. Recovery requests do not inherit session
+cookies, authentication, headers, or hooks.
+
+Before any PUT, Archivist hashes every prepared source from its current offset
+with bounded reads and restores the offset. It then checks the complete batch.
+An existing filename matches only when its size, MD5, and SHA-1 all match the
+prepared source. A conflict prevents every PUT in that pass. Missing checksums,
+an incomplete listing, pending ingest, unknown task states, server
+unavailability, and unresolved visibility produce a
+`InternetArchiveRecoveryDeferredError` when `wait=False`. Task errors and
+ownership, provenance, or checksum conflicts require operator action.
+
+With `wait=True`, those temporary states are polled using reads only. One
+monotonic deadline covers readiness checks, checks between files, ingest, and
+final checksum verification. The synchronous deadline has the same limitation
+as upload polling: a response that continuously sends data can exceed the
+remaining wall-clock budget. Keep each source open, at the same starting
+position, and byte-for-byte unchanged until the call returns.
+
+Only missing paths are PUT. Recovery does not check identifier availability,
+create a bucket, mutate metadata, remove files, roll back acknowledged files,
+submit tasks, follow redirects, or retry a mutation. A lost PUT response marks
+that file `uncertain` and stops the call. Its ETag, when present, records only a
+transfer acknowledgement. Reconcile with a new `get_item()` call before any
+further mutation after a network failure, cancellation, process interruption,
+or keyboard interrupt.
+
+Run one writer for an item across processes, restarts, manual edits, and other
+tools. Metadata can change between a read and a PUT, and the reviewed IAS3
+interface does not provide an atomic conditional no-overwrite guarantee.
+
 ### Ingest polling
 
 With `wait=False`, the result records file transfers and has
@@ -341,6 +422,17 @@ from archivist import AsyncInternetArchiveClient
 async def upload_example() -> None:
     async with AsyncInternetArchiveClient(account=account) as client:
         result = await client.upload(["example.txt"], options, wait=True)
+        snapshot = await client.get_item(options.identifier)
+        recovered = await client.add_files(
+            options.identifier,
+            ["example.txt"],
+            expected_metadata={
+                "source": options.metadata["source"],
+                "operation": options.metadata["operation"],
+            },
+            wait=True,
+        )
+        print(snapshot.availability, recovered.verification_complete)
         removals = await client.remove_items([result.identifier])
         print(removals[0].accepted)
 ```
