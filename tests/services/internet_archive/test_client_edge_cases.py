@@ -23,6 +23,7 @@ from archivist import (
     InternetArchiveSaveOptions,
     InternetArchiveSuccessStatus,
     InvalidOptionError,
+    InvalidServiceResponseError,
     NetworkError,
     OptionCombinationError,
     PollingTimeoutError,
@@ -249,7 +250,7 @@ def test_sync_login_rejects_every_invalid_csrf_shape(token_payload: object) -> N
         session=as_sync_session(session),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="CSRF"):
+    with pytest.raises(InvalidServiceResponseError, match="CSRF"):
         client.login()
 
 
@@ -272,7 +273,7 @@ async def test_async_login_rejects_every_invalid_csrf_shape(
         session=as_async_session(session),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="CSRF"):
+    with pytest.raises(InvalidServiceResponseError, match="CSRF"):
         await client.login()
 
 
@@ -295,7 +296,7 @@ def test_sync_login_failure_success_and_authentication_shortcuts() -> None:
         session=as_sync_session(failed),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="Email and/or password incorrect"):
+    with pytest.raises(AuthenticationError, match="login failed"):
         client.login()
 
     fallback = SyncSession(
@@ -305,7 +306,7 @@ def test_sync_login_failure_success_and_authentication_shortcuts() -> None:
         session=as_sync_session(fallback),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="login failed"):
+    with pytest.raises(InvalidServiceResponseError, match="invalid login data"):
         fallback_client.login()
 
     session = SyncSession(
@@ -355,7 +356,7 @@ async def test_async_login_failure_success_and_authentication_shortcuts() -> Non
         session=as_async_session(failed),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="Email and/or password incorrect"):
+    with pytest.raises(AuthenticationError, match="login failed"):
         await client.login()
 
     fallback = AsyncSession(
@@ -365,7 +366,7 @@ async def test_async_login_failure_success_and_authentication_shortcuts() -> Non
         session=as_async_session(fallback),
         account=InternetArchiveAccount("user", "password"),
     )
-    with pytest.raises(AuthenticationError, match="login failed"):
+    with pytest.raises(InvalidServiceResponseError, match="invalid login data"):
         await fallback_client.login()
 
     session = AsyncSession(

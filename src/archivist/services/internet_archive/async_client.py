@@ -18,11 +18,11 @@ import niquests
 
 from archivist.core._http import (
     ResponseLike,
+    async_raise_for_common_status,
     async_response_json,
     async_response_mapping,
     async_response_text,
     parse_retry_after,
-    raise_for_common_status,
     translate_request_error,
 )
 from archivist.core._urls import (
@@ -41,6 +41,7 @@ from archivist.core.errors import (
     ServiceError,
 )
 from archivist.services.internet_archive import _common, _items, _recovery
+from archivist.services.internet_archive import _diagnostics as diagnostics
 from archivist.services.internet_archive.item_models import (
     InternetArchiveChecksumState,
     InternetArchiveFileDisposition,
@@ -131,6 +132,7 @@ class AsyncInternetArchiveClient:
         request_log_url: str | None = None,
         **kwargs: Any,  # noqa: ANN401 - niquests accepts heterogeneous request options.
     ) -> object:
+        diagnostics.begin_request(method, url)
         self._ensure_open()
         logger.debug("%s %s", method, sanitize_url_for_log(request_log_url or url))
         effective_timeout = (
@@ -143,6 +145,7 @@ class AsyncInternetArchiveClient:
                 method, url, timeout=effective_timeout, **kwargs
             )
             await self._session.gather(cast("Any", response))
+            diagnostics.received_response(response)
             return response
         except (niquests.exceptions.RequestException, OSError) as exc:
             error = translate_request_error(exc, service=_common.SERVICE)
@@ -193,6 +196,7 @@ class AsyncInternetArchiveClient:
             service=_common.SERVICE,
         )
 
+    @diagnostics.async_diagnostic_operation
     async def login(self) -> None:
         """Authenticate the session with configured Archive.org account credentials."""
         if self._account_authenticated:
@@ -208,8 +212,8 @@ class AsyncInternetArchiveClient:
             headers={"Accept": "application/json"},
             allow_redirects=False,
         )
-        raise_for_common_status(
-            cast("ResponseLike", token_response), service=_common.SERVICE
+        await _items.async_raise_for_item_status(
+            token_response, authentication_statuses=frozenset()
         )
         token_data = await async_response_mapping(
             token_response, service=_common.SERVICE
@@ -225,7 +229,7 @@ class AsyncInternetArchiveClient:
             or not isinstance(token, str)
             or not token
         ):
-            raise AuthenticationError(
+            raise InvalidServiceResponseError(
                 "Archive.org did not provide a CSRF token", service=_common.SERVICE
             )
 
@@ -242,18 +246,15 @@ class AsyncInternetArchiveClient:
             },
             allow_redirects=False,
         )
-        raise_for_common_status(
-            cast("ResponseLike", login_response),
-            service=_common.SERVICE,
-            authentication_statuses=frozenset({400, 401, 403}),
-        )
+        if cast("ResponseLike", login_response).status_code == HTTPStatus.BAD_REQUEST:
+            _items.validate_login(
+                await async_response_mapping(login_response, service=_common.SERVICE)
+            )
+        await _items.async_raise_for_item_status(login_response)
         login_data = await async_response_mapping(
             login_response, service=_common.SERVICE
         )
-        if login_data.get("success") is not True:
-            raise AuthenticationError(
-                "Archive.org account login failed", service=_common.SERVICE
-            )
+        _items.validate_login(login_data)
         self._account_authenticated = True
         logger.info("authenticated an Archive.org account session")
 
@@ -281,6 +282,7 @@ class AsyncInternetArchiveClient:
         data: Any = None,  # noqa: ANN401 - Niquests accepts heterogeneous bodies.
     ) -> object:
         """Send a recovery request without session cookies, auth, headers, or hooks."""
+        diagnostics.begin_request(method, url)
         self._ensure_open()
         explicit_headers = {
             "Accept": "application/json",
@@ -312,6 +314,7 @@ class AsyncInternetArchiveClient:
                     **settings,
                 )
                 await self._session.gather(cast("Any", response))
+                diagnostics.received_response(response)
                 return response
             return await self._request(
                 method,
@@ -329,6 +332,7 @@ class AsyncInternetArchiveClient:
             error = translate_request_error(exc, service=_common.SERVICE)
         raise error from None
 
+    @diagnostics.async_diagnostic_operation
     async def get_item(self, identifier: str) -> InternetArchiveItem:
         """Return one typed Metadata API snapshot without mutating the item."""
         _items._validate_identifier(identifier)
@@ -339,13 +343,20 @@ class AsyncInternetArchiveClient:
             allow_redirects=False,
         )
         typed = cast("ResponseLike", response)
-        if typed.status_code in {401, 403, 429} or (
-            HTTPStatus.MULTIPLE_CHOICES <= typed.status_code < HTTPStatus.BAD_REQUEST
+        if (
+            typed.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR
+            or typed.status_code in {401, 403, 429}
+            or (
+                HTTPStatus.MULTIPLE_CHOICES
+                <= typed.status_code
+                < HTTPStatus.BAD_REQUEST
+            )
         ):
-            _items.raise_for_item_status(typed)
+            await _items.async_raise_for_item_status(response)
         data = await async_response_mapping(response, service=_common.SERVICE)
         return _recovery.parse_item(data, identifier, status_code=typed.status_code)
 
+    @diagnostics.async_diagnostic_operation
     async def _recovery_key(self) -> InternetArchiveApiKey:
         """Resolve and return the LOW pair that remains pinned for one operation."""
         if self._api_key is None:
@@ -356,12 +367,13 @@ class AsyncInternetArchiveClient:
                 cookies=self._request_cookies(),
                 allow_redirects=False,
             )
-            _items.raise_for_item_status(cast("ResponseLike", response))
+            await _items.async_raise_for_item_status(response)
             self._api_key = _items.parse_upload_key(
                 await async_response_text(response, service=_common.SERVICE)
             )
         return self._api_key
 
+    @diagnostics.async_diagnostic_operation
     async def add_files(  # noqa: PLR0912,PLR0913,PLR0915 - Recovery state machine.
         self,
         identifier: str,
@@ -459,7 +471,7 @@ class AsyncInternetArchiveClient:
                         ),
                         params={"op": "whoami"},
                     )
-                    _items.raise_for_item_status(cast("ResponseLike", response))
+                    await _items.async_raise_for_item_status(response)
                     identity = _recovery.parse_identity(
                         await async_response_mapping(response, service=_common.SERVICE)
                     )
@@ -478,12 +490,17 @@ class AsyncInternetArchiveClient:
                             params={"extended_err": "1"},
                         )
                         typed_metadata = cast("ResponseLike", metadata_response)
-                        if typed_metadata.status_code in {401, 403, 429} or (
-                            HTTPStatus.MULTIPLE_CHOICES
-                            <= typed_metadata.status_code
-                            < HTTPStatus.BAD_REQUEST
+                        if (
+                            typed_metadata.status_code
+                            >= HTTPStatus.INTERNAL_SERVER_ERROR
+                            or typed_metadata.status_code in {401, 403, 429}
+                            or (
+                                HTTPStatus.MULTIPLE_CHOICES
+                                <= typed_metadata.status_code
+                                < HTTPStatus.BAD_REQUEST
+                            )
                         ):
-                            _items.raise_for_item_status(typed_metadata)
+                            await _items.async_raise_for_item_status(metadata_response)
                         item = _recovery.parse_item(
                             await async_response_mapping(
                                 metadata_response, service=_common.SERVICE
@@ -499,15 +516,17 @@ class AsyncInternetArchiveClient:
                             request_timeout=remaining(phase),
                             params={"name": "catalogRows", "identifier": identifier},
                         )
-                        _items.raise_for_item_status(
-                            cast("ResponseLike", catalog_response)
-                        )
+                        await _items.async_raise_for_item_status(catalog_response)
                         catalog_complete = _items.parse_catalog(
                             await async_response_mapping(
                                 catalog_response, service=_common.SERVICE
                             )
                         )
                         phase = InternetArchiveRecoveryPhase.RECONCILIATION
+                        diagnostics.begin_request(
+                            "GET", f"{_recovery.METADATA_URL}/{identifier}"
+                        )
+                        diagnostics.received_response(metadata_response)
                         decision = _recovery.reconcile(
                             item,
                             identity,
@@ -655,7 +674,7 @@ class AsyncInternetArchiveClient:
                             data=_items.AsyncPreparedFile(current.file),
                         )
                         typed_response = cast("ResponseLike", response)
-                        _items.raise_for_item_status(typed_response)
+                        await _items.async_raise_for_item_status(response)
                         if typed_response.status_code != HTTPStatus.OK or (
                             await async_response_text(response, service=_common.SERVICE)
                         ):
@@ -680,6 +699,7 @@ class AsyncInternetArchiveClient:
                 if not wait and len(missing) == 1:
                     return result()
 
+    @diagnostics.async_diagnostic_operation
     async def upload(
         self,
         files: Path | Iterable[InternetArchiveUploadFile | str | Path],
@@ -719,7 +739,7 @@ class AsyncInternetArchiveClient:
                     cookies=self._request_cookies(),
                     allow_redirects=False,
                 )
-                _items.raise_for_item_status(cast("ResponseLike", response))
+                await _items.async_raise_for_item_status(response)
                 self._api_key = _items.parse_upload_key(
                     await async_response_text(response, service=_common.SERVICE)
                 )
@@ -736,7 +756,7 @@ class AsyncInternetArchiveClient:
                 },
                 allow_redirects=False,
             )
-            _items.raise_for_item_status(cast("ResponseLike", response))
+            await _items.async_raise_for_item_status(response)
             _items.validate_availability(
                 await async_response_mapping(response, service=_common.SERVICE),
                 options.identifier,
@@ -759,7 +779,7 @@ class AsyncInternetArchiveClient:
                     data=b"",
                     allow_redirects=False,
                 )
-                _items.raise_for_item_status(cast("ResponseLike", response))
+                await _items.async_raise_for_item_status(response)
                 if cast("ResponseLike", response).status_code != HTTPStatus.OK or (
                     await async_response_text(response, service=_common.SERVICE)
                 ):
@@ -781,7 +801,7 @@ class AsyncInternetArchiveClient:
                         data=_items.AsyncPreparedFile(file),
                         allow_redirects=False,
                     )
-                    _items.raise_for_item_status(cast("ResponseLike", response))
+                    await _items.async_raise_for_item_status(response)
                     if cast("ResponseLike", response).status_code != HTTPStatus.OK or (
                         await async_response_text(response, service=_common.SERVICE)
                     ):
@@ -812,6 +832,7 @@ class AsyncInternetArchiveClient:
                 options.identifier, tuple(outcomes), processing_complete=wait
             )
 
+    @diagnostics.async_diagnostic_operation
     async def _wait_for_upload(
         self, identifier: str, *, wait_timeout: float, poll_interval: float
     ) -> None:
@@ -832,7 +853,7 @@ class AsyncInternetArchiveClient:
                             request_timeout=remaining,
                             allow_redirects=False,
                         )
-                        _items.raise_for_item_status(cast("ResponseLike", response))
+                        await _items.async_raise_for_item_status(response)
                         complete = _items.parse_catalog(
                             await async_response_mapping(
                                 response, service=_common.SERVICE
@@ -861,6 +882,7 @@ class AsyncInternetArchiveClient:
                 timeout=wait_timeout,
             ) from None
 
+    @diagnostics.async_diagnostic_operation
     async def remove_items(
         self, identifiers: Iterable[str], *, comment: str = "Removed with Archivist"
     ) -> tuple[InternetArchiveRemovalResult, ...]:
@@ -877,7 +899,7 @@ class AsyncInternetArchiveClient:
             data=form,
             allow_redirects=False,
         )
-        _items.raise_for_item_status(cast("ResponseLike", response))
+        await _items.async_raise_for_item_status(response)
         return _items.parse_removal(
             await async_response_text(response, service=_common.SERVICE), ids
         )
@@ -917,7 +939,7 @@ class AsyncInternetArchiveClient:
             data=payload,
             request_log_url=_common.SAVE_URL if anonymous else None,
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         job = (
             _common.parse_anonymous_submission(
                 await async_response_text(response, service=_common.SERVICE),
@@ -949,7 +971,7 @@ class AsyncInternetArchiveClient:
             params={"_t": str(int(time.time() * 1000))},
             request_timeout=request_timeout,
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         retry_after, _ = parse_retry_after(cast("ResponseLike", response).headers)
         return _common.parse_capture_status(
             await async_response_mapping(response, service=_common.SERVICE),
@@ -973,7 +995,7 @@ class AsyncInternetArchiveClient:
             cookies=self._request_cookies(),
             data={"job_ids": ",".join(ids)},
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         return _common.parse_status_collection(
             await async_response_json(response, service=_common.SERVICE)
         )
@@ -991,7 +1013,7 @@ class AsyncInternetArchiveClient:
             cookies=self._request_cookies(),
             data={"job_id_outlinks": job_id},
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         return _common.parse_outlink_status_collection(
             await async_response_json(response, service=_common.SERVICE)
         )
@@ -1156,9 +1178,10 @@ class AsyncInternetArchiveClient:
                 "tags": list(archive_tags),
             },
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         logger.info("added Internet Archive job %s to My Web Archive", capture.job_id)
 
+    @diagnostics.async_diagnostic_operation
     async def my_web_archive_url(self) -> str:
         """Return the authenticated account's public web archive URL."""
         await self._ensure_account_authentication()
@@ -1169,7 +1192,7 @@ class AsyncInternetArchiveClient:
             cookies=self._request_cookies(),
             params={"op": "whoami"},
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await _items.async_raise_for_item_status(response)
         return _common.parse_my_web_archive_url(
             await async_response_mapping(response, service=_common.SERVICE)
         )
@@ -1184,7 +1207,7 @@ class AsyncInternetArchiveClient:
             cookies=self._request_cookies(),
             params={"_t": str(int(time.time() * 1000))},
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         return _common.parse_user_status(
             await async_response_mapping(response, service=_common.SERVICE)
         )
@@ -1198,7 +1221,7 @@ class AsyncInternetArchiveClient:
             headers=self._headers() if authenticated else None,
             cookies=self._request_cookies(),
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         return _common.parse_system_status(
             await async_response_mapping(response, service=_common.SERVICE)
         )
@@ -1216,7 +1239,7 @@ class AsyncInternetArchiveClient:
         if timestamp_value is not None:
             params["timestamp"] = timestamp_value
         response = await self._request("GET", _common.AVAILABILITY_URL, params=params)
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         return _common.parse_availability(
             await async_response_mapping(response, service=_common.SERVICE)
         )
@@ -1235,7 +1258,7 @@ class AsyncInternetArchiveClient:
         ]
         params.extend(_common.cdx_search_params(options))
         response = await self._request("GET", _common.CDX_URL, params=params)
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        await async_raise_for_common_status(response, service=_common.SERVICE)
         return _common.parse_cdx(
             await async_response_json(response, service=_common.SERVICE)
         )

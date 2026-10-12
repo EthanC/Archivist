@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message><Resource>simulated error caused by x-(amz|archive)-simulate-error, try x-archive-simulate-error:help</Resource><RequestId>fixture-request-id</RequestId></Error>

@@ -19,6 +19,7 @@ from archivist.core.errors import (
     InvalidServiceResponseError,
     NetworkError,
     RateLimitError,
+    ServiceDiagnostics,
     TLSVerificationError,
 )
 
@@ -285,7 +286,46 @@ def raise_for_common_status(
     status_code = response.status_code
     if status_code < _HTTP_ERROR_STATUS:
         return
+    # Imported here because the pure parser reuses the HTTP text/retry helpers.
+    from archivist.core._diagnostics import response_diagnostics  # noqa: PLC0415 - Avoid a parser/helper import cycle.
+
+    diagnostics = response_diagnostics(response, request_phase="request")
     reason = response_error_reason(response)
+    _raise_common_status(
+        status_code, service, authentication_statuses, diagnostics, reason
+    )
+
+
+async def async_raise_for_common_status(
+    response: object,
+    *,
+    service: str,
+    authentication_statuses: frozenset[int] = _AUTHENTICATION_STATUSES,
+) -> None:
+    """Classify async HTTP failures after awaiting bounded diagnostic body access."""
+    typed = cast("ResponseLike", response)
+    if typed.status_code < _HTTP_ERROR_STATUS:
+        return
+    from archivist.core._diagnostics import async_response_diagnostics  # noqa: PLC0415 - Avoid a parser/helper import cycle.
+
+    diagnostics = await async_response_diagnostics(response, request_phase="request")
+    _raise_common_status(
+        typed.status_code,
+        service,
+        authentication_statuses,
+        diagnostics,
+        diagnostics.get("service_message"),
+    )
+
+
+def _raise_common_status(
+    status_code: int,
+    service: str,
+    authentication_statuses: frozenset[int],
+    diagnostics: ServiceDiagnostics,
+    reason: str | None,
+) -> None:
+    """Share HTTP classification while allowing transport-specific body access."""
     reason_suffix = f": {reason}" if reason is not None else ""
     if status_code in authentication_statuses:
         logger.warning(
@@ -295,22 +335,22 @@ def raise_for_common_status(
             f"{service} rejected the request credentials{reason_suffix}",
             service=service,
             status_code=status_code,
+            **diagnostics,
         )
     if status_code == _HTTP_RATE_LIMIT_STATUS:
-        retry_after, raw = parse_retry_after(response.headers)
         logger.warning("%s rate limit reached", service)
         raise RateLimitError(
             f"{service} rate limit reached{reason_suffix}",
             service=service,
             status_code=status_code,
-            retry_after=retry_after,
-            retry_after_raw=raw,
+            **diagnostics,
         )
     logger.warning("%s returned HTTP %s", service, status_code)
     raise InvalidServiceResponseError(
         f"{service} returned HTTP {status_code}{reason_suffix}",
         service=service,
         status_code=status_code,
+        **diagnostics,
     )
 
 

@@ -40,6 +40,7 @@ from archivist.core.errors import (
     ServiceError,
 )
 from archivist.services.internet_archive import _common, _items, _recovery
+from archivist.services.internet_archive import _diagnostics as diagnostics
 from archivist.services.internet_archive.item_models import (
     InternetArchiveChecksumState,
     InternetArchiveFileDisposition,
@@ -128,6 +129,7 @@ class InternetArchiveClient:
         request_log_url: str | None = None,
         **kwargs: Any,  # noqa: ANN401 - niquests accepts heterogeneous request options.
     ) -> niquests.Response:
+        diagnostics.begin_request(method, url)
         self._ensure_open()
         logger.debug("%s %s", method, sanitize_url_for_log(request_log_url or url))
         effective_timeout = (
@@ -143,6 +145,7 @@ class InternetArchiveClient:
         except (niquests.exceptions.RequestException, OSError) as exc:
             error = translate_request_error(exc, service=_common.SERVICE)
         else:
+            diagnostics.received_response(response)
             return response
         raise error from None
 
@@ -189,6 +192,7 @@ class InternetArchiveClient:
             service=_common.SERVICE,
         )
 
+    @diagnostics.diagnostic_operation
     def login(self) -> None:
         """Authenticate the session with configured Archive.org account credentials."""
         if self._account_authenticated:
@@ -205,8 +209,8 @@ class InternetArchiveClient:
             headers={"Accept": "application/json"},
             allow_redirects=False,
         )
-        raise_for_common_status(
-            cast("ResponseLike", token_response), service=_common.SERVICE
+        _items.raise_for_item_status(
+            cast("ResponseLike", token_response), authentication_statuses=frozenset()
         )
         token_data = response_mapping(
             cast("ResponseLike", token_response), service=_common.SERVICE
@@ -222,7 +226,7 @@ class InternetArchiveClient:
             or not isinstance(token, str)
             or not token
         ):
-            raise AuthenticationError(
+            raise InvalidServiceResponseError(
                 "Archive.org did not provide a CSRF token", service=_common.SERVICE
             )
 
@@ -239,18 +243,18 @@ class InternetArchiveClient:
             },
             allow_redirects=False,
         )
-        raise_for_common_status(
-            cast("ResponseLike", login_response),
-            service=_common.SERVICE,
-            authentication_statuses=frozenset({400, 401, 403}),
-        )
+        # HTTP 400 alone does not establish rejection of account credentials.
+        if login_response.status_code == HTTPStatus.BAD_REQUEST:
+            _items.validate_login(
+                response_mapping(
+                    cast("ResponseLike", login_response), service=_common.SERVICE
+                )
+            )
+        _items.raise_for_item_status(cast("ResponseLike", login_response))
         login_data = response_mapping(
             cast("ResponseLike", login_response), service=_common.SERVICE
         )
-        if login_data.get("success") is not True:
-            raise AuthenticationError(
-                "Archive.org account login failed", service=_common.SERVICE
-            )
+        _items.validate_login(login_data)
         self._account_authenticated = True
         logger.info("authenticated an Archive.org account session")
 
@@ -279,6 +283,7 @@ class InternetArchiveClient:
         data: Any = None,  # noqa: ANN401 - Niquests accepts heterogeneous bodies.
     ) -> niquests.Response:
         """Send an identity-isolated recovery request, with one mutation attempt."""
+        diagnostics.begin_request(method, url)
         self._ensure_open()
         explicit_headers = {
             "Accept": "application/json",
@@ -318,6 +323,7 @@ class InternetArchiveClient:
                         request, allow_redirects=False, **send_options
                     )
                     self._session.gather(response)
+                diagnostics.received_response(response)
                 return response
             return self._request(
                 method,
@@ -335,6 +341,7 @@ class InternetArchiveClient:
             error = translate_request_error(exc, service=_common.SERVICE)
         raise error from None
 
+    @diagnostics.diagnostic_operation
     def get_item(self, identifier: str) -> InternetArchiveItem:
         """Return one typed Metadata API snapshot without mutating the item."""
         _items._validate_identifier(identifier)
@@ -345,10 +352,14 @@ class InternetArchiveClient:
             allow_redirects=False,
         )
         typed_response = cast("ResponseLike", response)
-        if typed_response.status_code in {401, 403, 429} or (
-            HTTPStatus.MULTIPLE_CHOICES
-            <= typed_response.status_code
-            < HTTPStatus.BAD_REQUEST
+        if (
+            typed_response.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR
+            or typed_response.status_code in {401, 403, 429}
+            or (
+                HTTPStatus.MULTIPLE_CHOICES
+                <= typed_response.status_code
+                < HTTPStatus.BAD_REQUEST
+            )
         ):
             _items.raise_for_item_status(typed_response)
         data = response_mapping(typed_response, service=_common.SERVICE)
@@ -356,6 +367,7 @@ class InternetArchiveClient:
             data, identifier, status_code=typed_response.status_code
         )
 
+    @diagnostics.diagnostic_operation
     def _recovery_key(self) -> InternetArchiveApiKey:
         """Resolve and return the LOW pair that remains pinned for one operation."""
         if self._api_key is None:
@@ -372,6 +384,7 @@ class InternetArchiveClient:
             )
         return self._api_key
 
+    @diagnostics.diagnostic_operation
     def add_files(  # noqa: PLR0912,PLR0913,PLR0915 - Recovery state machine.
         self,
         identifier: str,
@@ -476,10 +489,14 @@ class InternetArchiveClient:
                         params={"extended_err": "1"},
                     )
                     typed_metadata = cast("ResponseLike", metadata_response)
-                    if typed_metadata.status_code in {401, 403, 429} or (
-                        HTTPStatus.MULTIPLE_CHOICES
-                        <= typed_metadata.status_code
-                        < HTTPStatus.BAD_REQUEST
+                    if (
+                        typed_metadata.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR
+                        or typed_metadata.status_code in {401, 403, 429}
+                        or (
+                            HTTPStatus.MULTIPLE_CHOICES
+                            <= typed_metadata.status_code
+                            < HTTPStatus.BAD_REQUEST
+                        )
                     ):
                         _items.raise_for_item_status(typed_metadata)
                     item = _recovery.parse_item(
@@ -506,6 +523,10 @@ class InternetArchiveClient:
                         )
                     )
                     phase = InternetArchiveRecoveryPhase.RECONCILIATION
+                    diagnostics.begin_request(
+                        "GET", f"{_recovery.METADATA_URL}/{identifier}"
+                    )
+                    diagnostics.received_response(metadata_response)
                     decision = _recovery.reconcile(
                         item,
                         identity,
@@ -674,6 +695,7 @@ class InternetArchiveClient:
                 if not wait and len(missing) == 1:
                     return result()
 
+    @diagnostics.diagnostic_operation
     def upload(
         self,
         files: Path | Iterable[InternetArchiveUploadFile | str | Path],
@@ -813,6 +835,7 @@ class InternetArchiveClient:
                 options.identifier, tuple(outcomes), processing_complete=wait
             )
 
+    @diagnostics.diagnostic_operation
     def _wait_for_upload(
         self, identifier: str, *, wait_timeout: float, poll_interval: float
     ) -> None:
@@ -859,6 +882,7 @@ class InternetArchiveClient:
                 return
             time.sleep(min(poll_interval, remaining))
 
+    @diagnostics.diagnostic_operation
     def remove_items(
         self, identifiers: Iterable[str], *, comment: str = "Removed with Archivist"
     ) -> tuple[InternetArchiveRemovalResult, ...]:
@@ -1128,6 +1152,7 @@ class InternetArchiveClient:
         raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
         logger.info("added Internet Archive job %s to My Web Archive", capture.job_id)
 
+    @diagnostics.diagnostic_operation
     def my_web_archive_url(self) -> str:
         """Return the authenticated account's public web archive URL."""
         self._ensure_account_authentication()
@@ -1138,7 +1163,7 @@ class InternetArchiveClient:
             cookies=self._request_cookies(),
             params={"op": "whoami"},
         )
-        raise_for_common_status(cast("ResponseLike", response), service=_common.SERVICE)
+        _items.raise_for_item_status(cast("ResponseLike", response))
         return _common.parse_my_web_archive_url(
             response_mapping(cast("ResponseLike", response), service=_common.SERVICE)
         )

@@ -460,6 +460,7 @@ class InternetArchiveUploadError(ServiceError):
 
         ``failed_file`` identifies the failed transfer when known. Other files
         with ``transferred=False`` were not attempted; no rollback is implied.
+        Inspect ``cause`` for structured response diagnostics and retry hints.
         """
         super().__init__(
             "Internet Archive item upload failed",
@@ -482,7 +483,7 @@ class InternetArchiveRecoveryError(ServiceError):
         phase: InternetArchiveRecoveryPhase,
         failed_file: str | None = None,
     ) -> None:
-        """Retain the safe cause, failed filename, and failure phase."""
+        """Retain the cause (including diagnostics), failed filename, and phase."""
         super().__init__(
             "Internet Archive file recovery failed",
             service="Internet Archive",

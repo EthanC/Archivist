@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Mapping
@@ -24,6 +25,7 @@ MAX_BODY_BYTES = 16 * 1024
 MAX_FIELD_LENGTH = 256
 MAX_MESSAGE_LENGTH = 1024
 MAX_HEADER_LENGTH = 256
+MAX_ASYNC_READ_SECONDS = 1.0
 # x-amz-request-id is the S3 request ID header. No speculative Archive headers.
 _HEADERS = frozenset({"content-type", "retry-after", "x-amz-request-id"})
 _URL = re.compile(r"(?i)https?://[^\s<>\"']+")
@@ -49,8 +51,8 @@ def _safe_text(value: object, limit: int) -> str | None:
     """Remove URLs and labeled credentials before markup removal and truncation."""
     if not isinstance(value, str):
         return None
-    value = _URL.sub("[redacted-url]", unescape(value))
     try:
+        value = _URL.sub("[redacted-url]", unescape(value))
         value = sanitize_service_reason(value, max_length=MAX_BODY_BYTES)
     except (AssertionError, ValueError):
         return None
@@ -150,7 +152,8 @@ async def async_response_diagnostics(
     try:
         body = typed.text
         if isawaitable(body):
-            body = await body
+            async with asyncio.timeout(MAX_ASYNC_READ_SECONDS):
+                body = await body
     except _READ_ERRORS:
         body = None
     return parse_response_diagnostics(body, typed.headers, request_phase=request_phase)

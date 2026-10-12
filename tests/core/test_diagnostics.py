@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pickle
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from typing import cast
 
 import pytest
 
+from archivist.core import _diagnostics
 from archivist.core._diagnostics import (
     MAX_BODY_BYTES,
     MAX_FIELD_LENGTH,
@@ -19,7 +21,11 @@ from archivist.core._diagnostics import (
     parse_response_diagnostics,
     response_diagnostics,
 )
-from archivist.core._http import ResponseLike
+from archivist.core._http import (
+    ResponseLike,
+    async_raise_for_common_status,
+    raise_for_common_status,
+)
 from archivist.core.errors import (
     AuthenticationError,
     CaptureFailedError,
@@ -39,6 +45,7 @@ from archivist.services.internet_archive.item_models import (
     InternetArchiveUploadFileResult,
     InternetArchiveUploadResult,
 )
+from tests.conftest import FIXTURES
 from tests.core.test_http import BrokenTextResponse, awaiting
 
 
@@ -64,6 +71,17 @@ def test_recognized_json_explanations(field: str) -> None:
     """Accept the existing fixture-confirmed JSON reason fields and S3 casing."""
     data = parse_response_diagnostics(json.dumps({field: "Rejected"}), {})
     assert data["service_message"] == "Rejected"
+
+
+def test_archive_simulation_fixture_matches_the_documented_s3_error_shape() -> None:
+    """Parse a public SlowDown simulation captured on 2026-10-12, with a dummy ID."""
+    body = (FIXTURES / "internet_archive" / "s3_slow_down.xml").read_text(
+        encoding="utf-8"
+    )
+    data = parse_response_diagnostics(body, {})
+    assert data["service_code"] == "SlowDown"
+    assert data["service_message"] == "Please reduce your request rate."
+    assert data["request_id"] == "fixture-request-id"
 
 
 @pytest.mark.parametrize(
@@ -93,6 +111,13 @@ def test_unusable_bodies_keep_only_headers(body: object) -> None:
     data = parse_response_diagnostics(body, {"X-Amz-Request-Id": "support-id"})
     assert data["service_code"] is data["service_message"] is None
     assert data["request_id"] == "support-id"
+
+
+def test_invalid_html_character_reference_does_not_replace_service_failure() -> None:
+    """Discard malformed diagnostic strings that exceed integer decoder limits."""
+    message = "&#" + "9" * 5000 + ";"
+    data = parse_response_diagnostics(json.dumps({"Message": message}), {})
+    assert data["service_message"] is None
 
 
 def test_fields_and_header_allowlist_are_bounded_copied_and_sanitized() -> None:
@@ -243,6 +268,23 @@ def test_service_subclasses_pickle_diagnostics(error_type: type[ServiceError]) -
     assert restored.diagnostic_headers == {"retry-after": "12"}
 
 
+@pytest.mark.asyncio
+async def test_lazy_diagnostic_reads_have_a_separate_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled optional diagnostic read retains headers and the original failure."""
+    monkeypatch.setattr(_diagnostics, "MAX_ASYNC_READ_SECONDS", 0.01)
+
+    async def stalled() -> str:
+        await asyncio.Event().wait()
+        raise AssertionError("stalled diagnostic read resumed")
+
+    response = SimpleNamespace(text=stalled(), headers={"Retry-After": "5"})
+    data = await async_response_diagnostics(response)
+    assert data["service_message"] is None
+    assert data["retry_after"] == float(response.headers["Retry-After"])
+
+
 def test_wrapper_pickle_preserves_cause_results_and_keyword_fields() -> None:
     """Restore wrappers without invoking their result-dependent constructors."""
     cause = ServiceError(
@@ -276,3 +318,29 @@ def test_wrapper_pickle_preserves_cause_results_and_keyword_fields() -> None:
         assert restored.cause.__dict__ == cause.__dict__
         assert restored.failed_file == error.failed_file
     assert pickle.loads(pickle.dumps(recovery)).phase == recovery.phase
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 429, 503])
+async def test_common_http_failures_retain_diagnostics_in_both_transports(
+    status: int,
+) -> None:
+    """Keep retry hints and shared fields outside the item-specific helpers too."""
+    body = json.dumps({"Message": "Try later", "Code": "FutureCode"})
+    response = SimpleNamespace(
+        status_code=status,
+        text=body,
+        headers={"Retry-After": "5", "Content-Type": "application/json"},
+        json=lambda: json.loads(body),
+    )
+    with pytest.raises(ServiceError) as sync_failure:
+        raise_for_common_status(cast("ResponseLike", response), service="Test")
+    response.text = awaiting(body)
+    with pytest.raises(type(sync_failure.value)) as async_failure:
+        await async_raise_for_common_status(response, service="Test")
+    assert sync_failure.value.__dict__ == async_failure.value.__dict__
+    assert async_failure.value.retry_after == float(response.headers["Retry-After"])
+    assert async_failure.value.request_phase == "request"
+    await async_raise_for_common_status(
+        SimpleNamespace(status_code=200), service="Test"
+    )

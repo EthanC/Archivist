@@ -23,15 +23,17 @@ from html.parser import HTMLParser
 from http import HTTPStatus
 from io import SEEK_END
 from pathlib import Path
-from typing import BinaryIO, ParamSpec, TypeVar
+from typing import BinaryIO, ParamSpec, TypeVar, cast
 from urllib.parse import quote
 
-from archivist.core._http import ResponseLike, parse_retry_after
+from archivist.core._diagnostics import async_response_diagnostics, response_diagnostics
+from archivist.core._http import ResponseLike
 from archivist.core.errors import (
     AuthenticationError,
     InvalidOptionError,
     InvalidServiceResponseError,
     RateLimitError,
+    ServiceDiagnostics,
     ServiceError,
 )
 from archivist.services.internet_archive.item_models import (
@@ -68,24 +70,61 @@ _REMOVAL_ACCEPTED = re.compile(
 )
 
 
-def raise_for_item_status(response: ResponseLike) -> None:
+def raise_for_item_status(
+    response: ResponseLike,
+    *,
+    authentication_statuses: frozenset[int] = frozenset({401, 403}),
+) -> None:
     """Reject redirects and HTTP failures without echoing secret-bearing HTML."""
     status = response.status_code
     if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
         return
+    _raise_item_status(status, response_diagnostics(response), authentication_statuses)
+
+
+async def async_raise_for_item_status(
+    response: object, *, authentication_statuses: frozenset[int] = frozenset({401, 403})
+) -> None:
+    """Reject an async failure after awaiting any lazy body access."""
+    status = cast("ResponseLike", response).status_code
+    if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
+        return
+    _raise_item_status(
+        status, await async_response_diagnostics(response), authentication_statuses
+    )
+
+
+def _raise_item_status(
+    status: int,
+    diagnostics: ServiceDiagnostics,
+    authentication_statuses: frozenset[int],
+) -> None:
+    """Classify status while preserving the shared bounded diagnostics."""
     message = f"Internet Archive item request returned HTTP {status}"
-    if status in {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}:
-        raise AuthenticationError(message, service=_SERVICE, status_code=status)
+    if status in authentication_statuses:
+        raise AuthenticationError(
+            message, service=_SERVICE, status_code=status, **diagnostics
+        )
     if status == HTTPStatus.TOO_MANY_REQUESTS:
-        retry_after, raw = parse_retry_after(response.headers)
         raise RateLimitError(
             message,
             service=_SERVICE,
             status_code=status,
-            retry_after=retry_after,
-            retry_after_raw=raw,
+            **diagnostics,
         )
-    raise InvalidServiceResponseError(message, service=_SERVICE, status_code=status)
+    raise InvalidServiceResponseError(
+        message, service=_SERVICE, status_code=status, **diagnostics
+    )
+
+
+def validate_login(data: Mapping[str, object]) -> None:
+    """Distinguish explicit rejection from malformed login acknowledgements."""
+    if data.get("success") is False:
+        raise AuthenticationError("Archive.org account login failed", service=_SERVICE)
+    if data.get("success") is not True:
+        raise InvalidServiceResponseError(
+            "Archive.org returned invalid login data", service=_SERVICE
+        )
 
 
 @dataclass(frozen=True, slots=True)
