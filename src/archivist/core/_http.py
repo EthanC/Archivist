@@ -100,7 +100,9 @@ def parse_retry_after(
     return max(0.0, seconds), raw
 
 
-def sanitize_service_reason(value: object) -> str | None:
+def sanitize_service_reason(
+    value: object, *, max_length: int = _MAX_ERROR_REASON_LENGTH
+) -> str | None:
     """Return bounded visible service text without common reflected credentials."""
     if not isinstance(value, str):
         return None
@@ -109,7 +111,7 @@ def sanitize_service_reason(value: object) -> str | None:
     reason = " ".join(" ".join(parser.parts).split())
     reason = _URL_USER_INFO.sub(r"\1<redacted>@", reason)
     reason = _EMAIL_ADDRESS.sub("<redacted-email>", reason)
-    return reason[:_MAX_ERROR_REASON_LENGTH].rstrip() or None
+    return reason[:max_length].rstrip() or None
 
 
 def response_error_reason(response: ResponseLike) -> str | None:
