@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import date
 from http import HTTPStatus
@@ -205,7 +205,7 @@ async def cleanup_after_upload(
     session: niquests.AsyncSession,
     identifier: str,
     marker: str,
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None]:
     """Arm cleanup before upload and preserve failures while shielding recovery."""
     original: BaseException | None = None
     try:

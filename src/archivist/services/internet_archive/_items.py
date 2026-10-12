@@ -9,7 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -149,7 +156,7 @@ class AsyncPreparedFile:
 @asynccontextmanager
 async def async_prepare_files(
     files: Path | Iterable[InternetArchiveUploadFile | str | Path], identifier: str
-) -> AsyncIterator[tuple[PreparedFile, ...]]:
+) -> AsyncGenerator[tuple[PreparedFile, ...]]:
     """Prepare sources and close owned handles off-loop, after active I/O finishes."""
     stack = ExitStack()
     try:

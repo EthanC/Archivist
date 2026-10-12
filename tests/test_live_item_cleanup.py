@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
@@ -107,7 +107,7 @@ def fake_client(monkeypatch: pytest.MonkeyPatch) -> FakeClient:
     )
 
     @asynccontextmanager
-    async def reader(*, retries: int) -> AsyncIterator[object]:
+    async def reader(*, retries: int) -> AsyncGenerator[object]:
         assert retries == 0
         yield object()
 

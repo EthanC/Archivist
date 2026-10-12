@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -439,7 +439,7 @@ class AsyncInternetArchiveClient:
             @asynccontextmanager
             async def within_deadline(
                 phase: InternetArchiveRecoveryPhase,
-            ) -> AsyncIterator[None]:
+            ) -> AsyncGenerator[None]:
                 try:
                     async with asyncio.timeout(remaining(phase)):
                         yield
