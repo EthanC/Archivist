@@ -280,6 +280,76 @@ operation. A creation conflict must never trigger cleanup of a preexisting item.
 A later file-transfer conflict does not rule out creation by this operation;
 cleanup still requires independent ownership proof.
 
+### Failure diagnostics
+
+Inspect the service exception directly for preflight/login failures. For
+`InternetArchiveUploadError`, `InternetArchiveRecoveryError`, or
+`InternetArchiveRecoveryDeferredError`, inspect `error.cause`:
+
+```python
+from archivist import InternetArchiveRecoveryError, InternetArchiveUploadError
+
+try:
+    result = client.upload(["example.txt"], options)
+except (InternetArchiveUploadError, InternetArchiveRecoveryError) as error:
+    cause = error.cause
+    print(cause.status_code, cause.service_code, cause.service_message)
+    print(cause.request_id, cause.request_phase)
+    print(cause.retry_after, cause.retry_after_raw)
+    print(error.failed_file, error.result.files)
+    raise
+```
+
+The sync and async clients use these phase strings:
+
+| Phase | Request |
+| --- | --- |
+| `csrf` | Public CSRF token lookup. |
+| `login` | Account login. |
+| `upload-key` | Authenticated uploader credential lookup. |
+| `identifier-check` | Advisory identifier availability query. |
+| `item-create` | Standalone create-only bucket PUT. |
+| `file-upload` | Original-file PUT during upload or recovery. |
+| `item-metadata` | Metadata API lookup or failed reconciliation. |
+| `identity` | Authenticated `whoami` lookup. |
+| `request` | Other requests, including uploader catalog polling. |
+
+Request phases describe transport steps. Recovery wrapper `.phase` retains the
+existing `InternetArchiveRecoveryPhase` state-machine value. A network failure
+before a usable response has `status_code=None` and does not inherit status or
+headers from an earlier successful request.
+
+HTTP 429 remains `RateLimitError`; HTTP 503 remains a service-response failure.
+Both can carry `retry_after`, and S3 codes such as `SlowDown`, `ServiceUnavailable`,
+and unrecognized future codes remain strings. The library does not infer an
+application retry policy from a code or replay a create/file PUT. HTTP 200 with
+an unexpected acknowledgement body remains a failure and now retains its
+diagnostics.
+
+Login classification corrections: generic HTML HTTP 400, malformed login
+acknowledgements, and failures obtaining the public CSRF token raise
+`InvalidServiceResponseError`, rather than implying a bad password. Explicit
+JSON `success: false` on login, or HTTP 401/403 on login, still raises
+`AuthenticationError`. An HTTP 400 JSON reply needs explicit rejection to be
+classified as authentication failure. Authentication error messages no longer
+require callers to extract a server explanation from exception text; use
+`service_message` when supplied.
+
+Metadata HTTP 5xx now raises `InvalidServiceResponseError`, wrapped by
+`InternetArchiveRecoveryError` during recovery, rather than treating the failed
+HTTP request as a valid unavailable-item snapshot. Valid unavailable/restricted
+metadata snapshots retain their existing item and recovery semantics.
+
+[The common diagnostic contract](core.md#service-error-diagnostics) specifies
+field types, parser limits, redaction, and header allowlisting. The sanitized
+fixture `tests/fixtures/internet_archive/s3_slow_down.xml` comes from the
+[documented IAS3 error simulation](https://archive.org/developers/ias3.html#dealing-with-api-errors):
+a public GET with `x-archive-simulate-error:SlowDown` returned HTTP 503 on
+2026-10-12. Its request ID was replaced with `fixture-request-id`. The response
+used XML `RequestId`; no Archive-specific request-ID header was observed or
+added to the allowlist. `x-amz-request-id` is the standard S3 header fallback.
+Normal tests use local fixtures only.
+
 ### Recover interrupted file transfers
 
 `upload()` remains create-only. Use `get_item()` for a read-only snapshot and
