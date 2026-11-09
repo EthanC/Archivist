@@ -25,6 +25,7 @@ from archivist.services.internet_archive.item_models import (
     InternetArchiveUploadError,
     InternetArchiveUploadFile,
     InternetArchiveUploadFileResult,
+    InternetArchiveUploadLimit,
     InternetArchiveUploadOptions,
     InternetArchiveUploadResult,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "InternetArchiveUploadError",
     "InternetArchiveUploadFile",
     "InternetArchiveUploadFileResult",
+    "InternetArchiveUploadLimit",
     "InternetArchiveUploadOptions",
     "InternetArchiveUploadResult",
     "InternetArchiveUserStatus",

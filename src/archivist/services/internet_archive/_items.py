@@ -26,7 +26,12 @@ from pathlib import Path
 from typing import BinaryIO, ParamSpec, TypeVar, cast
 from urllib.parse import quote
 
-from archivist.core._diagnostics import async_response_diagnostics, response_diagnostics
+from archivist.core._diagnostics import (
+    MAX_FIELD_LENGTH,
+    _safe_text,
+    async_response_diagnostics,
+    response_diagnostics,
+)
 from archivist.core._http import ResponseLike
 from archivist.core.errors import (
     AuthenticationError,
@@ -39,6 +44,7 @@ from archivist.core.errors import (
 from archivist.services.internet_archive.item_models import (
     InternetArchiveRemovalResult,
     InternetArchiveUploadFile,
+    InternetArchiveUploadLimit,
     InternetArchiveUploadOptions,
     _normalize_metadata,
     _text_values,
@@ -50,6 +56,7 @@ from archivist.services.internet_archive.models import InternetArchiveApiKey
 UPLOAD_URL = "https://archive.org/upload"
 UPLOAD_API_URL = "https://archive.org/upload/app/upload_api.php"
 S3_URL = "https://s3.us.archive.org"
+UPLOAD_LIMIT_TIMEOUT = 15.0
 MANAGE_URL = "https://archive.org/manage/"
 
 _SERVICE = "Internet Archive"
@@ -507,6 +514,39 @@ def parse_catalog(data: Mapping[str, object]) -> bool:
             service=_SERVICE,
         )
     return not pending
+
+
+def upload_limit_params(identifier: str, access_key: str) -> dict[str, str]:
+    """Build the documented unsigned IAS3 ``check_limit`` query."""
+    _validate_identifier(identifier)
+    return {"check_limit": "1", "accesskey": access_key, "bucket": identifier}
+
+
+def parse_upload_limit(data: Mapping[str, object]) -> InternetArchiveUploadLimit:
+    """Read ``over_limit`` and integer ``detail`` counters without inferring policy.
+
+    Booleans and numeric strings are not integers. A missing or non-object
+    ``detail`` yields no counters and no reason.
+    """
+    over_limit = data.get("over_limit")
+    detail = data.get("detail")
+    if not isinstance(detail, Mapping):
+        detail = {}
+    return InternetArchiveUploadLimit(
+        over_limit=(
+            bool(over_limit)
+            if isinstance(over_limit, int) and not isinstance(over_limit, bool)
+            else None
+        ),
+        limit_reason=_safe_text(detail.get("limit_reason"), MAX_FIELD_LENGTH),
+        counters={
+            key: value
+            for key, value in detail.items()
+            if isinstance(key, str)
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        },
+    )
 
 
 def removal_form(ids: Iterable[str], comment: str) -> dict[str, str]:

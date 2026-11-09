@@ -55,6 +55,8 @@ def begin_request(method: str, url: str) -> None:
         phase = "upload-key"
     elif url == _items.UPLOAD_API_URL and method == "POST":
         phase = "identifier-check"
+    elif url == _items.S3_URL:
+        phase = "upload-limit"
     elif url.startswith(_items.S3_URL + "/"):
         phase = "file-upload" if "/" in url[len(_items.S3_URL) + 1 :] else "item-create"
     elif url.startswith(_recovery.METADATA_URL + "/"):

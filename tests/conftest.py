@@ -414,6 +414,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                         ),
                     },
                 )
+        elif request.path == "/ia/s3" and request.method == "GET":
+            self._json(
+                200,
+                {
+                    "accesskey": request.query.get("accesskey", [""])[0],
+                    "bucket": request.query.get("bucket", [""])[0],
+                    "over_limit": 0,
+                    "detail": {"limit_reason": "", "total_tasks_queued": 0},
+                },
+            )
         elif request.path.startswith("/ia/s3/") and request.method == "PUT":
             bucket, separator, _ = request.path.removeprefix("/ia/s3/").partition("/")
             if not separator:

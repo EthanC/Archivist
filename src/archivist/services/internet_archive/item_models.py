@@ -455,6 +455,26 @@ class InternetArchiveRemovalResult:
     task_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class InternetArchiveUploadLimit:
+    """One IAS3 ``check_limit`` reading, reported without a deferral policy.
+
+    ``over_limit`` is ``True`` when IAS3 reports that writes are likely to get
+    HTTP 503 SlowDown, ``False`` when the queue accepts more uploads or deletes,
+    and ``None`` when the field was absent or not an integer. ``counters`` holds
+    every integer field from the response's ``detail`` object, copied without
+    interpretation. IAS3 documents ``detail`` as internal and subject to change.
+    """
+
+    over_limit: bool | None = None
+    limit_reason: str | None = None
+    counters: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        """Copy counters into a read-only mapping."""
+        object.__setattr__(self, "counters", MappingProxyType(dict(self.counters)))
+
+
 class InternetArchiveUploadError(ServiceError):
     """An upload failure with partial outcomes and the underlying service error."""
 

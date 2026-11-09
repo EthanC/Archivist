@@ -55,6 +55,7 @@ from archivist.services.internet_archive.item_models import (
     InternetArchiveUploadError,
     InternetArchiveUploadFile,
     InternetArchiveUploadFileResult,
+    InternetArchiveUploadLimit,
     InternetArchiveUploadOptions,
     InternetArchiveUploadResult,
 )
@@ -274,21 +275,23 @@ class AsyncInternetArchiveClient:
         self,
         method: str,
         url: str,
-        key: InternetArchiveApiKey,
+        key: InternetArchiveApiKey | None,
         *,
         request_timeout: float,
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
         data: Any = None,  # noqa: ANN401 - Niquests accepts heterogeneous bodies.
     ) -> object:
-        """Send a recovery request without session cookies, auth, headers, or hooks."""
+        """Send a request without session cookies, auth, headers, or hooks.
+
+        ``key=None`` sends no Authorization header at all.
+        """
         diagnostics.begin_request(method, url)
         self._ensure_open()
-        explicit_headers = {
-            "Accept": "application/json",
-            "Authorization": f"LOW {key.access_key}:{key.secret_key}",
-            **dict(headers or {}),
-        }
+        explicit_headers = {"Accept": "application/json"}
+        if key is not None:
+            explicit_headers["Authorization"] = f"LOW {key.access_key}:{key.secret_key}"
+        explicit_headers.update(headers or {})
         effective_timeout = min(self._timeout, request_timeout)
         logger.debug("%s %s", method, sanitize_url_for_log(url))
         try:
@@ -372,6 +375,31 @@ class AsyncInternetArchiveClient:
                 await async_response_text(response, service=_common.SERVICE)
             )
         return self._api_key
+
+    @diagnostics.async_diagnostic_operation
+    async def upload_limit(self, identifier: str) -> InternetArchiveUploadLimit:
+        """Return IAS3's current upload-queue reading for one item identifier.
+
+        The S3 access key is resolved and cached as for ``upload``, then sent as
+        a query value; the request carries no Authorization header, session
+        cookies, or redirects, and its timeout is capped at 15 seconds. The
+        result reports the service's answer only: callers decide whether to
+        defer writes and how to treat a failed or inconclusive check.
+        """
+        self._ensure_open()
+        _items._validate_identifier(identifier)
+        key = await self._recovery_key()
+        response = await self._recovery_request(
+            "GET",
+            _items.S3_URL,
+            None,
+            request_timeout=_items.UPLOAD_LIMIT_TIMEOUT,
+            params=_items.upload_limit_params(identifier, key.access_key),
+        )
+        await _items.async_raise_for_item_status(response)
+        return _items.parse_upload_limit(
+            await async_response_mapping(response, service=_common.SERVICE)
+        )
 
     @diagnostics.async_diagnostic_operation
     async def add_files(  # noqa: PLR0912,PLR0913,PLR0915 - Recovery state machine.

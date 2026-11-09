@@ -358,6 +358,7 @@ The sync and async clients use these phase strings:
 | `file-upload` | Original-file PUT during upload or recovery. |
 | `item-metadata` | Metadata API lookup or failed reconciliation. |
 | `identity` | Authenticated `whoami` lookup. |
+| `upload-limit` | IAS3 `check_limit` query. |
 | `request` | Other requests, including uploader catalog polling. |
 
 Request phases describe transport steps. Recovery wrapper `.phase` retains the
@@ -395,6 +396,41 @@ a public GET with `x-archive-simulate-error:SlowDown` returned HTTP 503 on
 used XML `RequestId`; no Archive-specific request-ID header was observed or
 added to the allowlist. `x-amz-request-id` is the standard S3 header fallback.
 Normal tests use local fixtures only.
+
+### Check upload limits
+
+`upload_limit(identifier)` asks IAS3 whether its task queue can take more
+writes for an item, using the
+[documented `check_limit` query](https://archive.org/developers/ias3.html#use-limits).
+It makes no changes on the server.
+
+```python
+reading = client.upload_limit("example-item")
+if reading.over_limit:
+    print("defer:", reading.limit_reason, dict(reading.counters))
+```
+
+`InternetArchiveUploadLimit` has three fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `over_limit` | `bool \| None` | `True` when writes are likely to get HTTP 503 SlowDown, `False` when the queue is ready, `None` when the field is absent or not an integer. |
+| `limit_reason` | `str \| None` | The sanitized `detail.limit_reason`; empty becomes `None`. |
+| `counters` | `Mapping[str, int]` | Every integer field in `detail`, read-only and uninterpreted. |
+
+IAS3 documents `detail` as internal and subject to change, so treat `counters`
+as diagnostics rather than a stable schema.
+
+The S3 access key is resolved and cached as it is for `upload()`, so account
+and cookie clients make one uploader-page request on first use. The check sends
+that access key as a query value, with no `Authorization` header, session
+cookies, or redirects, and caps its timeout at 15 seconds. HTTP failures,
+unreadable bodies, and network errors raise the usual classified errors with
+`request_phase="upload-limit"`.
+
+The client does not decide policy. The application chooses whether
+`over_limit=True` defers writes, and how to treat `over_limit=None` or a failed
+check.
 
 ### Recover interrupted file transfers
 
@@ -539,6 +575,8 @@ from archivist import AsyncInternetArchiveClient
 
 async def upload_example() -> None:
     async with AsyncInternetArchiveClient(account=account) as client:
+        if (await client.upload_limit(options.identifier)).over_limit:
+            return
         result = await client.upload(["example.txt"], options, wait=True)
         snapshot = await client.get_item(options.identifier)
         recovered = await client.add_files(
