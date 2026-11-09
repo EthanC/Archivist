@@ -1368,18 +1368,20 @@ class InternetArchiveClient:
     ) -> _T:
         """Send one request capped at the deadline, as the async client's scope does.
 
-        A transport timeout caused by that cap means the deadline ran out, so it
-        becomes the same ``PollingTimeoutError`` the async client raises.
+        A transport timeout caused by that cap, or any network failure once the
+        deadline has passed, means the deadline ran out, so it becomes the same
+        ``PollingTimeoutError`` the async client raises.
         """
         remaining = self._remaining(deadline, identifier, timeout)
         try:
             return send(remaining)
         except NetworkError as exc:
-            if (
+            deadline_timeout = (
                 remaining < self._timeout
                 and exc.cause_type is not None
                 and "timeout" in exc.cause_type.lower()
-            ):
+            )
+            if deadline_timeout or deadline - time.monotonic() <= 0:
                 raise self._timeout_error(identifier, timeout) from None
             raise
 

@@ -751,6 +751,21 @@ def test_sync_deadline_capped_request_timeout_is_a_polling_timeout(
     client.close()
 
 
+def test_sync_network_failure_after_the_deadline_is_a_polling_timeout() -> None:
+    """Any transport failure once the deadline has passed ends the wait, as in async."""
+    client = InternetArchiveClient(timeout=30)
+    deadline = time.monotonic() + 0.01
+
+    def send(request_timeout: float) -> None:
+        while time.monotonic() < deadline:
+            time.sleep(0.001)
+        raise NetworkError("network", cause_type="ConnectionError")
+
+    with pytest.raises(PollingTimeoutError):
+        client._within_deadline(deadline, ID, 0.01, send)
+    client.close()
+
+
 @pytest.mark.asyncio
 async def test_existing_item_does_not_wait_out_missing_bucket(
     ia_endpoints: ServerState, client: Client, tmp_path: Path
