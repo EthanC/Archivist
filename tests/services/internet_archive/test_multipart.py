@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import time
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import replace
 from hashlib import md5, sha1
@@ -28,6 +29,7 @@ from archivist import (
     InternetArchiveUploadFile,
     InvalidOptionError,
     InvalidServiceResponseError,
+    NetworkError,
     PollingTimeoutError,
     ServiceError,
 )
@@ -633,12 +635,12 @@ async def test_verification_failures(
                 options(),
                 state=state,
                 wait=True,
-                timeout=0.05,
+                timeout=FAST["timeout"] if stored else 0.05,
                 poll_interval=0.01,
             )
         )
     expected = InvalidServiceResponseError if stored else PollingTimeoutError
-    assert isinstance(caught.value.cause, expected)
+    assert type(caught.value.cause) is expected
 
 
 @pytest.mark.asyncio
@@ -709,14 +711,44 @@ async def test_existing_item_refusals(
                 source(tmp_path),
                 expected_metadata=expected,
                 part_size=PART,
-                timeout=0.05,
+                # Only deferral should reach the deadline; the others must stop
+                # on their own, not because a slow runner ran out of time.
+                timeout=0.05 if problem == "deferred" else FAST["timeout"],
                 poll_interval=0.01,
             )
         )
     assert caught.value.state is None
     expected_cause = PollingTimeoutError if problem == "deferred" else ServiceError
-    assert isinstance(caught.value.cause, expected_cause)
+    assert type(caught.value.cause) is expected_cause
     assert not ia_endpoints.matching(EXISTING_OBJECT)
+
+
+@pytest.mark.parametrize(
+    ("cause_type", "remaining", "expected"),
+    [
+        ("ReadTimeout", 1.0, PollingTimeoutError),
+        ("ConnectTimeout", 1.0, PollingTimeoutError),
+        ("ReadTimeout", 60.0, NetworkError),
+        ("ConnectionError", 1.0, NetworkError),
+        (None, 1.0, NetworkError),
+    ],
+)
+def test_sync_deadline_capped_request_timeout_is_a_polling_timeout(
+    cause_type: str | None, remaining: float, expected: type[ServiceError]
+) -> None:
+    """Only a timeout caused by the deadline's cap ends the wait, as in async."""
+    client = InternetArchiveClient(timeout=30)
+    sent: list[float] = []
+
+    def send(request_timeout: float) -> None:
+        sent.append(request_timeout)
+        raise NetworkError("network", cause_type=cause_type)
+
+    with pytest.raises(ServiceError) as caught:
+        client._within_deadline(time.monotonic() + remaining, ID, remaining, send)
+    assert type(caught.value) is expected
+    assert 0 < sent[0] <= remaining
+    client.close()
 
 
 @pytest.mark.asyncio

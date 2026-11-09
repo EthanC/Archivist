@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any, Unpack, cast
+from typing import Any, TypeVar, Unpack, cast
 from urllib.parse import quote
 
 import niquests
@@ -86,6 +86,7 @@ from archivist.services.internet_archive.models import (
 )
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 class InternetArchiveClient:
@@ -1278,14 +1279,19 @@ class InternetArchiveClient:
         poll_interval: float,
     ) -> bool:
         """Apply ``add_files`` reconciliation; return whether the file matches."""
-        response, _ = self._multipart_call(
-            "GET",
-            _common.USER_INFO_URL,
-            key,
-            phase=None,
-            mutation=False,
-            params={"op": "whoami"},
-            request_timeout=self._remaining(deadline, identifier, timeout),
+        response, _ = self._within_deadline(
+            deadline,
+            identifier,
+            timeout,
+            lambda remaining: self._multipart_call(
+                "GET",
+                _common.USER_INFO_URL,
+                key,
+                phase=None,
+                mutation=False,
+                params={"op": "whoami"},
+                request_timeout=remaining,
+            ),
         )
         identity = _recovery.parse_identity(
             response_mapping(cast("ResponseLike", response), service=_common.SERVICE)
@@ -1294,17 +1300,25 @@ class InternetArchiveClient:
             digest.file, digest.offset, digest.md5, digest.sha1
         )
         while True:
-            item = self._multipart_item(
-                key, identifier, self._remaining(deadline, identifier, timeout)
+            item = self._within_deadline(
+                deadline,
+                identifier,
+                timeout,
+                lambda remaining: self._multipart_item(key, identifier, remaining),
             )
-            catalog, _ = self._multipart_call(
-                "GET",
-                _items.UPLOAD_API_URL,
-                key,
-                phase=None,
-                mutation=False,
-                params={"name": "catalogRows", "identifier": identifier},
-                request_timeout=self._remaining(deadline, identifier, timeout),
+            catalog, _ = self._within_deadline(
+                deadline,
+                identifier,
+                timeout,
+                lambda remaining: self._multipart_call(
+                    "GET",
+                    _items.UPLOAD_API_URL,
+                    key,
+                    phase=None,
+                    mutation=False,
+                    params={"name": "catalogRows", "identifier": identifier},
+                    request_timeout=remaining,
+                ),
             )
             catalog_complete = _items.parse_catalog(
                 response_mapping(cast("ResponseLike", catalog), service=_common.SERVICE)
@@ -1330,17 +1344,44 @@ class InternetArchiveClient:
             )
 
     @staticmethod
-    def _remaining(deadline: float, identifier: str, timeout: float) -> float:
+    def _timeout_error(identifier: str, timeout: float) -> PollingTimeoutError:
+        return PollingTimeoutError(
+            f"Internet Archive multipart upload waited longer than {timeout:g} seconds",
+            service=_common.SERVICE,
+            job_id=identifier,
+            timeout=timeout,
+        )
+
+    @classmethod
+    def _remaining(cls, deadline: float, identifier: str, timeout: float) -> float:
         value = deadline - time.monotonic()
         if value <= 0:
-            raise PollingTimeoutError(
-                "Internet Archive multipart upload waited longer than "
-                f"{timeout:g} seconds",
-                service=_common.SERVICE,
-                job_id=identifier,
-                timeout=timeout,
-            )
+            raise cls._timeout_error(identifier, timeout)
         return value
+
+    def _within_deadline(
+        self,
+        deadline: float,
+        identifier: str,
+        timeout: float,
+        send: Callable[[float], _T],
+    ) -> _T:
+        """Send one request capped at the deadline, as the async client's scope does.
+
+        A transport timeout caused by that cap means the deadline ran out, so it
+        becomes the same ``PollingTimeoutError`` the async client raises.
+        """
+        remaining = self._remaining(deadline, identifier, timeout)
+        try:
+            return send(remaining)
+        except NetworkError as exc:
+            if (
+                remaining < self._timeout
+                and exc.cause_type is not None
+                and "timeout" in exc.cause_type.lower()
+            ):
+                raise self._timeout_error(identifier, timeout) from None
+            raise
 
     def _initiate_multipart(  # noqa: PLR0913 - Explicit deadline fields.
         self,
@@ -1502,10 +1543,15 @@ class InternetArchiveClient:
         """Poll metadata until the assembled file matches the source."""
         deadline = time.monotonic() + timeout
         while True:
-            remaining = self._remaining(deadline, state.identifier, timeout)
-            status = _multipart.file_status(
-                self._multipart_item(key, state.identifier, remaining), state
+            item = self._within_deadline(
+                deadline,
+                state.identifier,
+                timeout,
+                lambda remaining: self._multipart_item(
+                    key, state.identifier, remaining
+                ),
             )
+            status = _multipart.file_status(item, state)
             if status is False:
                 raise InvalidServiceResponseError(
                     "Internet Archive assembled a file that does not match the source",
