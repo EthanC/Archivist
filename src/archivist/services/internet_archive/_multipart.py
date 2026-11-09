@@ -230,7 +230,12 @@ def check_resume(
 
 
 def new_state(
-    digest: SourceDigest, identifier: str, upload_id: str, *, queue_derive: bool
+    digest: SourceDigest,
+    identifier: str,
+    upload_id: str,
+    *,
+    queue_derive: bool,
+    interactive_priority: bool,
 ) -> InternetArchiveMultipartState:
     """Return the first resume state for a freshly initiated upload."""
     return InternetArchiveMultipartState(
@@ -242,6 +247,7 @@ def new_state(
         md5=digest.md5,
         sha1=digest.sha1,
         queue_derive=queue_derive,
+        interactive_priority=interactive_priority,
     )
 
 
@@ -255,29 +261,39 @@ def bucket_url(identifier: str) -> str:
     return f"{_items.S3_URL}/{identifier}"
 
 
-def initiate_headers(size: int) -> dict[str, str]:
+def initiate_headers(size: int, *, interactive_priority: bool) -> dict[str, str]:
     """Return headers for an empty-bodied initiate request."""
     return {
         "Content-Type": "application/octet-stream",
         "Content-Length": "0",
         "x-archive-size-hint": str(size),
+        **_items.priority_headers(interactive_priority),
     }
 
 
-def part_headers(length: int) -> dict[str, str]:
+def part_headers(state: InternetArchiveMultipartState, length: int) -> dict[str, str]:
     """Return headers for one part body."""
     return {
         "Content-Type": "application/octet-stream",
         "Content-Length": str(length),
+        **_items.priority_headers(state.interactive_priority),
     }
 
 
 def complete_headers(state: InternetArchiveMultipartState) -> dict[str, str]:
     """Return completion headers; derive settings take effect only here."""
-    headers = {"Content-Type": "application/xml"}
+    headers = {
+        "Content-Type": "application/xml",
+        **_items.priority_headers(state.interactive_priority),
+    }
     if not state.queue_derive:
         headers["x-archive-queue-derive"] = "0"
     return headers
+
+
+def abort_headers(state: InternetArchiveMultipartState) -> dict[str, str]:
+    """Return abort headers, keeping the upload's priority setting."""
+    return _items.priority_headers(state.interactive_priority)
 
 
 def complete_body(state: InternetArchiveMultipartState) -> bytes:

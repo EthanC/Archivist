@@ -216,6 +216,78 @@ async def test_wait_verifies_and_queue_derive_is_sent_on_completion(
     assert lower(complete)["x-archive-queue-derive"] == "0"
 
 
+def priorities(state: ServerState) -> list[str | None]:
+    """Return the interactive-priority header of every mutation, in order."""
+    return [
+        lower(request).get("x-archive-interactive-priority")
+        for request in state.requests
+        if request.method in {"PUT", "POST", "DELETE"} and "/ia/s3/" in request.path
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interactive_priority", [True, False])
+async def test_new_item_interactive_priority_applies_to_every_mutation(
+    ia_endpoints: ServerState,
+    client: Client,
+    tmp_path: Path,
+    interactive_priority: bool,
+) -> None:
+    """Create, initiate, parts, completion, and a resume all share one setting."""
+    ia_endpoints.queued_responses["PUT", OBJECT] = [SLOW]
+    upload_options = replace(options(), interactive_priority=interactive_priority)
+    path = source(tmp_path)
+    with pytest.raises(InternetArchiveMultipartError) as caught:
+        await resolve(client.upload_multipart(path, upload_options, part_size=PART))
+    saved = caught.value.state
+    assert saved is not None
+    assert saved.interactive_priority is interactive_priority
+    restored = InternetArchiveMultipartState.from_dict(
+        json.loads(json.dumps(saved.to_dict()))
+    )
+    result = await resolve(
+        client.upload_multipart(path, upload_options, state=restored)
+    )
+    assert result.state is not None
+    assert result.state.phase is InternetArchiveMultipartPhase.COMPLETED
+    # Create, initiate, the failed part, three parts, and completion.
+    sent = priorities(ia_endpoints)
+    assert len(sent) == 1 + 1 + 1 + THREE_PARTS + 1
+    assert sent == ["1" if interactive_priority else None] * len(sent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interactive_priority", [True, False])
+async def test_existing_item_and_abort_keep_the_saved_priority(
+    ia_endpoints: ServerState,
+    client: Client,
+    tmp_path: Path,
+    interactive_priority: bool,
+) -> None:
+    """add_file_multipart saves the setting, and abort reuses it."""
+    existing_item(ia_endpoints)
+    ia_endpoints.queued_responses["PUT", EXISTING_OBJECT] = [SLOW]
+    with pytest.raises(InternetArchiveMultipartError) as caught:
+        await resolve(
+            client.add_file_multipart(
+                EXISTING,
+                source(tmp_path),
+                expected_metadata=EXPECTED,
+                part_size=PART,
+                interactive_priority=interactive_priority,
+            )
+        )
+    saved = caught.value.state
+    assert saved is not None
+    assert saved.interactive_priority is interactive_priority
+    await resolve(client.abort_multipart(saved))
+    assert ia_endpoints.matching(EXISTING_OBJECT, "DELETE")
+    # Initiate, the failed part, and the abort.
+    sent = priorities(ia_endpoints)
+    assert len(sent) == 1 + 1 + 1
+    assert sent == ["1" if interactive_priority else None] * len(sent)
+
+
 @pytest.mark.asyncio
 async def test_new_item_waits_out_missing_bucket(
     ia_endpoints: ServerState, client: Client, tmp_path: Path
@@ -806,6 +878,15 @@ async def test_add_file_validation_happens_before_network(
                 queue_derive=cast("Any", 1),
             )
         )
+    with pytest.raises(InvalidOptionError, match="interactive_priority"):
+        await resolve(
+            client.add_file_multipart(
+                EXISTING,
+                path,
+                expected_metadata=EXPECTED,
+                interactive_priority=cast("Any", 1),
+            )
+        )
     with pytest.raises(InvalidOptionError, match="expected_metadata"):
         await resolve(client.add_file_multipart(EXISTING, path, expected_metadata={}))
     with pytest.raises(InvalidOptionError, match="file must be"):
@@ -845,6 +926,7 @@ def test_state_round_trips_through_json_values() -> None:
         ({"md5": "A" * 32}, "md5"),
         ({"sha1": "x"}, "sha1"),
         ({"queue_derive": 1}, "queue_derive"),
+        ({"interactive_priority": 1}, "interactive_priority"),
         (
             {"parts": [[2, '"' + "0" * 32 + '"', 8], [1, '"' + "0" * 32 + '"', 8]]},
             "ascending",

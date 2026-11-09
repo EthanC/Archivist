@@ -561,6 +561,18 @@ def test_upload_headers_have_exact_defaults_and_one_based_repeated_fields() -> N
     }
 
 
+def test_upload_headers_omit_only_the_priority_header_when_disabled() -> None:
+    """Request the normal queue without changing any other upload header."""
+    default = _items.upload_headers(_options(), 12)
+    normal = _items.upload_headers(_options(interactive_priority=False), 12)
+    assert "x-archive-interactive-priority" not in normal
+    assert normal == {
+        key: value
+        for key, value in default.items()
+        if key != "x-archive-interactive-priority"
+    }
+
+
 def test_upload_headers_encode_every_metadata_value_and_escape_underscores() -> None:
     """Encode Unicode, markup, multiline values, and repeated strings without loss."""
     scalar = " Caf\u00e9 / ?#&='\" "

@@ -230,6 +230,33 @@ async def test_upload_queue_derive_controls_the_final_file_header(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interactive_priority", [True, False])
+async def test_upload_interactive_priority_applies_to_every_put(
+    ia_endpoints: ServerState,
+    item_client: Client,
+    interactive_priority: bool,
+) -> None:
+    """Send the express-queue header on the create and every file PUT, or none."""
+    files = [
+        InternetArchiveUploadFile(BytesIO(PAYLOAD), f"file-{index}.bin")
+        for index in range(2)
+    ]
+    upload_options = options()
+    if not interactive_priority:
+        upload_options = replace(upload_options, interactive_priority=False)
+    await resolve(item_client.upload(files, upload_options))
+    puts = [request for request in ia_endpoints.requests if request.method == "PUT"]
+    assert len(puts) == 1 + len(files)
+    priority = [
+        {key.lower(): value for key, value in request.headers.items()}.get(
+            "x-archive-interactive-priority"
+        )
+        for request in puts
+    ]
+    assert priority == ["1" if interactive_priority else None] * len(puts)
+
+
+@pytest.mark.asyncio
 async def test_upload_without_wait_and_duplicate_identifier(
     ia_endpoints: ServerState,
     item_client: Client,

@@ -203,6 +203,21 @@ def test_queue_derive_requires_a_boolean(queue_derive: object) -> None:
         _options(queue_derive=queue_derive)
 
 
+def test_interactive_priority_defaults_to_the_express_queue() -> None:
+    """Keep interactive priority by default and accept an explicit opt-out."""
+    assert _options().interactive_priority is True
+    assert _options(interactive_priority=False).interactive_priority is False
+
+
+@pytest.mark.parametrize("interactive_priority", [0, 1, None, "false", []])
+def test_interactive_priority_requires_a_boolean(interactive_priority: object) -> None:
+    """Reject truthy and falsey values that are not actual booleans."""
+    with pytest.raises(
+        InvalidOptionError, match="interactive_priority must be a boolean"
+    ):
+        _options(interactive_priority=interactive_priority)
+
+
 @pytest.mark.parametrize("media_type", [None, [], 1, "", "video", "Movies", "data\n"])
 def test_media_type_rejects_unknown_and_nonstring_values(media_type: object) -> None:
     """Restrict media types to the uploader choices, including runtime types."""
@@ -234,6 +249,7 @@ def test_media_type_rejects_unknown_and_nonstring_values(media_type: object) -> 
         "license",
         "metadata",
         "queue_derive",
+        "interactive_priority",
     ],
 )
 def test_metadata_cannot_override_typed_or_server_owned_fields(key: str) -> None:

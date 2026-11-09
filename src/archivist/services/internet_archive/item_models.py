@@ -51,6 +51,7 @@ _RESERVED_METADATA = frozenset(
         "license",
         "metadata",
         "queue_derive",
+        "interactive_priority",
     }
 )
 
@@ -296,6 +297,12 @@ class InternetArchiveUploadOptions:
     so the upload queues no derive task. The item then keeps only its original
     files: no derivatives, thumbnails, or streaming formats exist until a derive
     is queued separately. The default queues one derive after the last file.
+
+    ``interactive_priority=True`` (the default) sends
+    ``x-archive-interactive-priority: 1`` on every PUT, requesting IA's express
+    queue. ``False`` omits the header so the upload uses the normal queue. IA
+    warns against mixing settings across writes to one item, so pass the same
+    value to ``add_files()`` and ``add_file_multipart()`` for that item.
     """
 
     identifier: str
@@ -313,6 +320,7 @@ class InternetArchiveUploadOptions:
         default_factory=lambda: MappingProxyType({})
     )
     queue_derive: bool = True
+    interactive_priority: bool = True
 
     def __post_init__(self) -> None:
         """Validate typed fields, collection choices, and custom metadata keys."""
@@ -337,6 +345,8 @@ class InternetArchiveUploadOptions:
             raise InvalidOptionError("test_item must be a boolean")
         if not isinstance(self.queue_derive, bool):
             raise InvalidOptionError("queue_derive must be a boolean")
+        if not isinstance(self.interactive_priority, bool):
+            raise InvalidOptionError("interactive_priority must be a boolean")
         if not isinstance(self.media_type, str) or self.media_type not in _COLLECTIONS:
             raise InvalidOptionError(
                 "media_type must be movies, audio, texts, software, image, or data"
@@ -589,6 +599,8 @@ class InternetArchiveMultipartState:
     continues. ``md5`` and ``sha1`` fingerprint the whole source; a resumed call
     rehashes the source and refuses to continue when they differ. ``parts``
     holds only parts whose ETag matched the local MD5 of their byte range.
+    ``queue_derive`` and ``interactive_priority`` are fixed when the upload is
+    initiated, so every later request, including an abort, uses the same values.
     """
 
     identifier: str
@@ -599,6 +611,7 @@ class InternetArchiveMultipartState:
     md5: str
     sha1: str
     queue_derive: bool = True
+    interactive_priority: bool = True
     phase: InternetArchiveMultipartPhase = InternetArchiveMultipartPhase.INITIATED
     parts: tuple[InternetArchiveMultipartPart, ...] = ()
 
@@ -619,6 +632,8 @@ class InternetArchiveMultipartState:
             raise InvalidOptionError("sha1 must be a lowercase hexadecimal SHA-1")
         if not isinstance(self.queue_derive, bool):
             raise InvalidOptionError("queue_derive must be a boolean")
+        if not isinstance(self.interactive_priority, bool):
+            raise InvalidOptionError("interactive_priority must be a boolean")
         if not isinstance(self.phase, InternetArchiveMultipartPhase):
             raise InvalidOptionError("phase must be an InternetArchiveMultipartPhase")
         parts = tuple(self.parts)
@@ -667,6 +682,7 @@ class InternetArchiveMultipartState:
             "md5": self.md5,
             "sha1": self.sha1,
             "queue_derive": self.queue_derive,
+            "interactive_priority": self.interactive_priority,
             "phase": self.phase.value,
             "parts": [[part.number, part.etag, part.size] for part in self.parts],
         }
@@ -687,6 +703,7 @@ class InternetArchiveMultipartState:
             "md5",
             "sha1",
             "queue_derive",
+            "interactive_priority",
             "phase",
             "parts",
         }
@@ -715,6 +732,7 @@ class InternetArchiveMultipartState:
             md5=values["md5"],
             sha1=values["sha1"],
             queue_derive=values["queue_derive"],
+            interactive_priority=values["interactive_priority"],
             phase=InternetArchiveMultipartPhase(phase),
             parts=tuple(InternetArchiveMultipartPart(*entry) for entry in raw_parts),
         )

@@ -427,19 +427,25 @@ class AsyncInternetArchiveClient:
         timeout: float = 300.0,  # noqa: ASYNC109 - Public recovery deadline.
         poll_interval: float = 2.0,
         queue_derive: bool = True,
+        interactive_priority: bool = True,
     ) -> InternetArchiveRecoveryResult:
         """Recover missing files on an owned item after conservative reconciliation.
 
         Source inspection and hashing run off-loop. Sources must remain unchanged
         through return. One deadline covers every readiness and verification read.
         ``queue_derive=False`` suppresses the derive task on every PUT, matching
-        the upload option.
+        the upload option. ``interactive_priority`` sends
+        ``x-archive-interactive-priority: 1`` on every PUT when true. IA warns
+        against mixing settings across writes to one item, so pass the value the
+        item was uploaded with.
         """
         self._ensure_open()
         if not isinstance(wait, bool):
             raise InvalidOptionError("wait must be a boolean")
         if not isinstance(queue_derive, bool):
             raise InvalidOptionError("queue_derive must be a boolean")
+        if not isinstance(interactive_priority, bool):
+            raise InvalidOptionError("interactive_priority must be a boolean")
         timeout = _common.validate_duration(timeout, name="timeout", allow_zero=False)
         poll_interval = _common.validate_duration(
             poll_interval, name="poll_interval", allow_zero=False
@@ -698,6 +704,7 @@ class AsyncInternetArchiveClient:
                 headers = {
                     "Content-Type": "application/octet-stream",
                     "Content-Length": str(current.size),
+                    **_items.priority_headers(interactive_priority),
                 }
                 if len(missing) > 1 or not queue_derive:
                     headers["x-archive-queue-derive"] = "0"
@@ -976,6 +983,7 @@ class AsyncInternetArchiveClient:
                 poll_interval=poll_interval,
                 options=options,
                 queue_derive=options.queue_derive,
+                interactive_priority=options.interactive_priority,
             )
 
     @diagnostics.async_diagnostic_operation
@@ -987,6 +995,7 @@ class AsyncInternetArchiveClient:
         expected_metadata: Mapping[str, str | Sequence[str]],
         part_size: int = _multipart.DEFAULT_PART_SIZE,
         queue_derive: bool = True,
+        interactive_priority: bool = True,
         state: InternetArchiveMultipartState | None = None,
         on_state: Callable[[InternetArchiveMultipartState], object] | None = None,
         wait: bool = False,
@@ -997,6 +1006,8 @@ class AsyncInternetArchiveClient:
         self._ensure_open()
         if not isinstance(queue_derive, bool):
             raise InvalidOptionError("queue_derive must be a boolean")
+        if not isinstance(interactive_priority, bool):
+            raise InvalidOptionError("interactive_priority must be a boolean")
         part_size, timeout, poll_interval = _multipart.validate_call(
             state=state,
             part_size=part_size,
@@ -1020,6 +1031,7 @@ class AsyncInternetArchiveClient:
                 poll_interval=poll_interval,
                 expected=expected,
                 queue_derive=queue_derive,
+                interactive_priority=interactive_priority,
             )
 
     @diagnostics.async_diagnostic_operation
@@ -1038,7 +1050,7 @@ class AsyncInternetArchiveClient:
                 _multipart.object_url(state.identifier, state.name),
                 key,
                 phase=_multipart.PHASE_ABORT,
-                mutation=True,
+                headers=_multipart.abort_headers(state),
                 params={"uploadId": state.upload_id},
             )
             status = cast("ResponseLike", response).status_code
@@ -1072,16 +1084,16 @@ class AsyncInternetArchiveClient:
         key: InternetArchiveApiKey,
         *,
         phase: str | None,
-        mutation: bool,
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
         data: Any = None,  # noqa: ANN401 - Niquests accepts heterogeneous bodies.
         request_timeout: float | None = None,
     ) -> tuple[object, str]:
-        """Send one identity-isolated request and return its accepted text."""
-        explicit = dict(headers or {})
-        if mutation:
-            explicit["x-archive-interactive-priority"] = "1"
+        """Send one identity-isolated request and return its accepted text.
+
+        Callers set the interactive-priority header themselves, from the
+        upload's saved setting, so every mutation on the item agrees.
+        """
         response = await self._recovery_request(
             method,
             url,
@@ -1089,7 +1101,7 @@ class AsyncInternetArchiveClient:
             request_timeout=(
                 self._timeout if request_timeout is None else request_timeout
             ),
-            headers=explicit,
+            headers=dict(headers or {}),
             params=params,
             data=data,
             phase=phase,
@@ -1108,6 +1120,7 @@ class AsyncInternetArchiveClient:
         timeout: float,  # noqa: ASYNC109 - Internal waiting deadline.
         poll_interval: float,
         queue_derive: bool,
+        interactive_priority: bool,
         options: InternetArchiveUploadOptions | None = None,
         expected: Mapping[str, InternetArchiveMetadataValue] | None = None,
     ) -> InternetArchiveMultipartResult:
@@ -1156,13 +1169,18 @@ class AsyncInternetArchiveClient:
                     digest,
                     identifier,
                     retry_missing_bucket=options is not None,
+                    interactive_priority=interactive_priority,
                     deadline=deadline,
                     timeout=timeout,
                     poll_interval=poll_interval,
                 )
                 await publish(
                     _multipart.new_state(
-                        digest, identifier, upload_id, queue_derive=queue_derive
+                        digest,
+                        identifier,
+                        upload_id,
+                        queue_derive=queue_derive,
+                        interactive_priority=interactive_priority,
                     )
                 )
             elif current.phase is not InternetArchiveMultipartPhase.COMPLETED:
@@ -1231,7 +1249,6 @@ class AsyncInternetArchiveClient:
             _multipart.bucket_url(options.identifier),
             key,
             phase=None,
-            mutation=True,
             headers=headers,
             data=b"",
         )
@@ -1262,7 +1279,6 @@ class AsyncInternetArchiveClient:
                     _common.USER_INFO_URL,
                     key,
                     phase=None,
-                    mutation=False,
                     params={"op": "whoami"},
                     request_timeout=self._remaining(deadline, identifier, timeout),
                 )
@@ -1281,7 +1297,6 @@ class AsyncInternetArchiveClient:
                         _items.UPLOAD_API_URL,
                         key,
                         phase=None,
-                        mutation=False,
                         params={"name": "catalogRows", "identifier": identifier},
                         request_timeout=self._remaining(deadline, identifier, timeout),
                     )
@@ -1338,6 +1353,7 @@ class AsyncInternetArchiveClient:
         identifier: str,
         *,
         retry_missing_bucket: bool,
+        interactive_priority: bool,
         deadline: float,
         timeout: float,  # noqa: ASYNC109 - Internal waiting deadline.
         poll_interval: float,
@@ -1350,8 +1366,9 @@ class AsyncInternetArchiveClient:
                     _multipart.object_url(identifier, digest.name) + "?uploads",
                     key,
                     phase=_multipart.PHASE_INITIATE,
-                    mutation=True,
-                    headers=_multipart.initiate_headers(digest.size),
+                    headers=_multipart.initiate_headers(
+                        digest.size, interactive_priority=interactive_priority
+                    ),
                     data=b"",
                 )
             except ServiceError as exc:
@@ -1375,7 +1392,6 @@ class AsyncInternetArchiveClient:
             _multipart.object_url(state.identifier, state.name),
             key,
             phase=_multipart.PHASE_LIST,
-            mutation=False,
             params={"uploadId": state.upload_id},
         )
         return _multipart.parse_list_parts(text, state)
@@ -1393,8 +1409,7 @@ class AsyncInternetArchiveClient:
             _multipart.object_url(state.identifier, state.name),
             key,
             phase=_multipart.PHASE_PART,
-            mutation=True,
-            headers=_multipart.part_headers(body.size),
+            headers=_multipart.part_headers(state, body.size),
             params={"partNumber": str(number), "uploadId": state.upload_id},
             data=_items.AsyncPreparedFile(body),
         )
@@ -1415,7 +1430,6 @@ class AsyncInternetArchiveClient:
             _multipart.object_url(state.identifier, state.name),
             key,
             phase=_multipart.PHASE_COMPLETE,
-            mutation=True,
             headers=_multipart.complete_headers(state),
             params={"uploadId": state.upload_id},
             data=_multipart.complete_body(state),
@@ -1464,7 +1478,6 @@ class AsyncInternetArchiveClient:
             _multipart.TASKS_URL,
             key,
             phase=_multipart.PHASE_EVIDENCE,
-            mutation=False,
             params=_multipart.task_params(state.identifier),
         )
         if _multipart.completion_task_found(

@@ -339,6 +339,64 @@ async def test_recovery_queue_derive_requires_a_boolean(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interactive_priority", [None, True, False])
+async def test_recovery_interactive_priority_matches_upload_default(
+    ia_endpoints: ServerState,
+    recovery_client: Client,
+    interactive_priority: bool | None,
+) -> None:
+    """Send the express-queue header on every recovery PUT unless opted out.
+
+    The default changed from omitting the header to sending it, so recovery
+    of an item created by a default ``upload()`` no longer mixes settings.
+    """
+    existing_item(ia_endpoints)
+    names = ["a.bin", "b.bin"]
+    extra = (
+        {}
+        if interactive_priority is None
+        else {"interactive_priority": interactive_priority}
+    )
+    result = await resolve(
+        recovery_client.add_files(
+            IDENTIFIER,
+            [InternetArchiveUploadFile(BytesIO(name.encode()), name) for name in names],
+            expected_metadata=EXPECTED,
+            **extra,
+        )
+    )
+    assert all(file.transferred for file in result.files)
+    puts = [request for request in ia_endpoints.requests if request.method == "PUT"]
+    priority = [
+        {name.lower(): value for name, value in request.headers.items()}.get(
+            "x-archive-interactive-priority"
+        )
+        for request in puts
+    ]
+    assert priority == [None if interactive_priority is False else "1"] * len(names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interactive_priority", [0, 1, None, "false"])
+async def test_recovery_interactive_priority_requires_a_boolean(
+    ia_endpoints: ServerState, recovery_client: Client, interactive_priority: object
+) -> None:
+    """Reject non-boolean priority settings before any request."""
+    with pytest.raises(
+        InvalidOptionError, match="interactive_priority must be a boolean"
+    ):
+        await resolve(
+            recovery_client.add_files(
+                IDENTIFIER,
+                [InternetArchiveUploadFile(BytesIO(b"data"), "file.bin")],
+                expected_metadata=EXPECTED,
+                interactive_priority=cast("bool", interactive_priority),
+            )
+        )
+    assert not ia_endpoints.requests
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("wait", [False, True])
 async def test_acknowledged_batch_file_must_be_visible_before_the_next_put(
     ia_endpoints: ServerState, recovery_client: Client, wait: bool

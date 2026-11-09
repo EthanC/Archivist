@@ -147,6 +147,7 @@ All list values are revalidated before upload.
 | `test_item` | `False` | Selects `test_collection`. Cannot be combined with another explicit collection. |
 | `metadata` | Empty mapping | Additional metadata, including `source`; each value is a nonblank string or nonempty list of nonblank strings. |
 | `queue_derive` | `True` | `False` suppresses the derive task for the whole upload. See [Derive tasks](#derive-tasks). |
+| `interactive_priority` | `True` | `False` uses IA's normal queue instead of the express queue. See [Queue priority](#queue-priority). |
 
 Without `test_item` or an explicit collection, the defaults are:
 
@@ -224,6 +225,38 @@ response = niquests.post(
 )
 response.raise_for_status()
 ```
+
+### Queue priority
+
+By default, every write sends `x-archive-interactive-priority: 1`, which asks
+IA for its [express queue](https://archive.org/developers/ias3.html). IA
+describes that queue as being for uploads that must be available as soon as
+possible, such as one an interactive user is waiting on. Unattended bulk
+archivers can pass `interactive_priority=False` to use the normal queue:
+
+```python
+options = InternetArchiveUploadOptions(
+    identifier="example-bulk-2026",
+    title="Example bulk item",
+    description="Archived by a scheduled job.",
+    subjects=["example"],
+    interactive_priority=False,
+)
+```
+
+IA warns against performing transactions on one item with mixed settings,
+because doing so can reorder how the requests are applied to the item. Use one
+setting for every write to an item:
+
+- `upload()` and `upload_multipart()` read it from the options and apply it to
+  the create PUT and every file, part, initiate, and completion request.
+- `add_files()` and `add_file_multipart()` take it as the keyword argument
+  `interactive_priority=`. Pass the value the item was uploaded with.
+- A multipart resume state saves the setting. Resumed calls and
+  `abort_multipart()` use the saved value and ignore the argument.
+
+IA does not document whether the setting affects `SlowDown` throttling, so the
+default keeps the express queue.
 
 ### Streams and filenames
 
@@ -508,10 +541,13 @@ position, and byte-for-byte unchanged until the call returns.
 
 Only missing paths are PUT. By default, the last missing file queues a derive
 task; pass `queue_derive=False` to suppress it on every PUT, as described in
-[Derive tasks](#derive-tasks). Recovery does not check identifier availability,
-create a bucket, mutate metadata, remove files, roll back acknowledged files,
-submit tasks, follow redirects, or retry a mutation. A lost PUT response marks
-that file `uncertain` and stops the call. Its ETag, when present, records only a
+[Derive tasks](#derive-tasks). Every recovery PUT also sends
+`x-archive-interactive-priority: 1` unless you pass
+`interactive_priority=False`; pass the value the item was uploaded with, as
+described in [Queue priority](#queue-priority). Recovery does not check
+identifier availability, create a bucket, mutate metadata, remove files, roll
+back acknowledged files, submit tasks, follow redirects, or retry a mutation. A
+lost PUT response marks that file `uncertain` and stops the call. Its ETag, when present, records only a
 transfer acknowledgement. Reconcile with a new `get_item()` call before any
 further mutation after a network failure, cancellation, process interruption,
 or keyboard interrupt.
@@ -631,8 +667,9 @@ IAS3 behavior probed live on 2026-11-09, which the client relies on:
   for multipart uploads. The extra tasks keep an item's tasks pending, so
   `add_files()` on the same item defers until the upload finishes.
 
-Every multipart mutation sends `x-archive-interactive-priority: 1`, matching
-`upload()`. Requests follow the identity-isolated recovery transport: the LOW
+Every multipart mutation, including an abort, uses the upload's saved
+`interactive_priority` setting, as described in
+[Queue priority](#queue-priority). Requests follow the identity-isolated recovery transport: the LOW
 key pair only, no session cookies, no redirects, and no retries. Service failures
 raise `InternetArchiveMultipartError` with the latest `state` (or `None` before
 an upload ID exists), `cause`, and `uncertain`. HTTP 503 `SlowDown` keeps its

@@ -312,6 +312,15 @@ def _remaining_size(stream: BinaryIO) -> int:
     return size
 
 
+def priority_headers(interactive_priority: bool) -> dict[str, str]:
+    """Return the express-queue header, or nothing for the normal queue.
+
+    IA warns that mixing settings across writes to one item can reorder how
+    the requests are applied, so every write to an item should use one value.
+    """
+    return {"x-archive-interactive-priority": "1"} if interactive_priority else {}
+
+
 def upload_headers(
     options: InternetArchiveUploadOptions, total_size: int
 ) -> dict[str, str]:
@@ -325,7 +334,7 @@ def upload_headers(
     headers = {
         "x-amz-acl": "bucket-owner-full-control",
         "x-archive-size-hint": str(total_size),
-        "x-archive-interactive-priority": "1",
+        **priority_headers(options.interactive_priority),
         "Content-Type": "multipart/form-data; charset=UTF-8",
     }
     metadata: dict[str, str | list[str]] = {
