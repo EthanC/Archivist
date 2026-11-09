@@ -32,17 +32,17 @@ Repository = "https://github.com/EthanC/Archivist"
 
 [dependency-groups]
 dev = [
-  "pytest>=9.1.1",
-  "pytest-asyncio>=1.4.0",
+  "pytest>=9.2.0",
+  "pytest-asyncio>=1.4.1.post1",
   "pytest-cov>=7.1.0",
-  "ruff>=0.17.0",
-  "ty>=0.0.86",
-  "zensical>=0.0.69",
-  "mkdocstrings-python>=2.0.9",
+  "ruff>=0.17.4",
+  "ty>=0.0.99",
+  "zensical>=0.1.0",
+  "mkdocstrings-python>=2.0.10",
 ]
 
 [build-system]
-requires = ["uv_build>=0.13.0,<0.14.0"]
+requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.coverage.run]
@@ -85,7 +85,7 @@ select = ["A", "ANN", "ASYNC", "B", "C4", "D", "E", "F", "I", "LOG", "N", "PERF"
 convention = "pep257"
 
 [tool.tox]
-requires = ["tox>=4.65.3", "tox-uv>=1.37.0"]
+requires = ["tox>=4.67.13", "tox-uv>=1.37.7"]
 env_list = [
   "3.15",
   "3.14",
