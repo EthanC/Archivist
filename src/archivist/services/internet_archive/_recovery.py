@@ -26,6 +26,8 @@ from archivist.services.internet_archive.item_models import (
 )
 
 METADATA_URL = "https://archive.org/metadata"
+# IAS3 stores open multipart parts here, reported as originals, until assembly.
+SPOOL_PREFIX = "__ia_spool/"
 
 _SERVICE = "Internet Archive"
 _MD5 = re.compile(r"[0-9a-fA-F]{32}")
@@ -235,6 +237,8 @@ def _file_source(
         raise _response_error("Internet Archive returned an invalid item file source")
     if name in {identifier + suffix for suffix in _GENERATED_SUFFIXES}:
         return InternetArchiveItemFileSource.GENERATED, value
+    if name.startswith(SPOOL_PREFIX):
+        return InternetArchiveItemFileSource.SPOOL, value
     if value == "original":
         return InternetArchiveItemFileSource.ORIGINAL, value
     if value == "derivative":

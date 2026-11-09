@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime
@@ -39,12 +39,23 @@ from archivist.core.errors import (
     PollingTimeoutError,
     ServiceError,
 )
-from archivist.services.internet_archive import _common, _items, _recovery
+from archivist.services.internet_archive import (
+    _common,
+    _items,
+    _multipart,
+    _recovery,
+)
 from archivist.services.internet_archive import _diagnostics as diagnostics
 from archivist.services.internet_archive.item_models import (
     InternetArchiveChecksumState,
     InternetArchiveFileDisposition,
     InternetArchiveItem,
+    InternetArchiveMetadataValue,
+    InternetArchiveMultipartError,
+    InternetArchiveMultipartPart,
+    InternetArchiveMultipartPhase,
+    InternetArchiveMultipartResult,
+    InternetArchiveMultipartState,
     InternetArchiveRecoveryDeferredError,
     InternetArchiveRecoveryError,
     InternetArchiveRecoveryFileResult,
@@ -128,9 +139,10 @@ class InternetArchiveClient:
         *,
         request_timeout: float | None = None,
         request_log_url: str | None = None,
+        request_phase: str | None = None,
         **kwargs: Any,  # noqa: ANN401 - niquests accepts heterogeneous request options.
     ) -> niquests.Response:
-        diagnostics.begin_request(method, url)
+        diagnostics.begin_request(method, url, request_phase)
         self._ensure_open()
         logger.debug("%s %s", method, sanitize_url_for_log(request_log_url or url))
         effective_timeout = (
@@ -282,12 +294,13 @@ class InternetArchiveClient:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
         data: Any = None,  # noqa: ANN401 - Niquests accepts heterogeneous bodies.
+        phase: str | None = None,
     ) -> niquests.Response:
         """Send an identity-isolated request, with one mutation attempt.
 
         ``key=None`` sends no Authorization header at all.
         """
-        diagnostics.begin_request(method, url)
+        diagnostics.begin_request(method, url, phase)
         self._ensure_open()
         explicit_headers = {"Accept": "application/json"}
         if key is not None:
@@ -332,6 +345,7 @@ class InternetArchiveClient:
                 method,
                 url,
                 request_timeout=request_timeout,
+                request_phase=phase,
                 headers=explicit_headers,
                 params=dict(params or {}),
                 data=data,
@@ -913,6 +927,570 @@ class InternetArchiveClient:
             if complete:
                 return
             time.sleep(min(poll_interval, remaining))
+
+    @diagnostics.diagnostic_operation
+    def upload_multipart(  # noqa: PLR0913 - Public resumable upload options.
+        self,
+        file: InternetArchiveUploadFile | str | Path,
+        options: InternetArchiveUploadOptions,
+        *,
+        part_size: int = _multipart.DEFAULT_PART_SIZE,
+        state: InternetArchiveMultipartState | None = None,
+        on_state: Callable[[InternetArchiveMultipartState], object] | None = None,
+        wait: bool = False,
+        timeout: float = 300.0,
+        poll_interval: float = 2.0,
+    ) -> InternetArchiveMultipartResult:
+        """Create a new item and upload one file in resumable parts.
+
+        The item is claimed with the same create-only bucket PUT as ``upload``.
+        ``on_state`` receives each new resume state before the next request;
+        pass the latest one back as ``state`` to resume. ``timeout`` bounds
+        waiting for the new item and, with ``wait=True``, for the assembled
+        file to show the source's size and MD5. Part transfers are bounded
+        only by the client's per-request timeout.
+        """
+        self._ensure_open()
+        if not isinstance(options, InternetArchiveUploadOptions):
+            raise InvalidOptionError("options must be InternetArchiveUploadOptions")
+        part_size, timeout, poll_interval = _multipart.validate_call(
+            state=state,
+            part_size=part_size,
+            on_state=on_state,
+            wait=wait,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+        with ExitStack() as stack:
+            prepared = _multipart.prepare_source(file, options.identifier, stack)
+            digest = _multipart.hash_source(prepared, part_size)
+            if state is not None:
+                _multipart.check_resume(state, digest, options.identifier)
+            self._ensure_item_transport()
+            return self._run_multipart(
+                digest,
+                options.identifier,
+                state,
+                on_state,
+                wait=wait,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                options=options,
+                queue_derive=options.queue_derive,
+            )
+
+    @diagnostics.diagnostic_operation
+    def add_file_multipart(  # noqa: PLR0913 - Public resumable upload options.
+        self,
+        identifier: str,
+        file: InternetArchiveUploadFile | str | Path,
+        *,
+        expected_metadata: Mapping[str, str | Sequence[str]],
+        part_size: int = _multipart.DEFAULT_PART_SIZE,
+        queue_derive: bool = True,
+        state: InternetArchiveMultipartState | None = None,
+        on_state: Callable[[InternetArchiveMultipartState], object] | None = None,
+        wait: bool = False,
+        timeout: float = 300.0,
+        poll_interval: float = 2.0,
+    ) -> InternetArchiveMultipartResult:
+        """Upload one file in resumable parts to an existing owned item.
+
+        A fresh call applies ``add_files`` ownership and provenance checks and
+        returns without uploading when the exact file is already present. A
+        resumed call trusts the saved upload ID instead. ``queue_derive`` is
+        saved in the state and sent on completion, where IAS3 honors it.
+        """
+        self._ensure_open()
+        if not isinstance(queue_derive, bool):
+            raise InvalidOptionError("queue_derive must be a boolean")
+        part_size, timeout, poll_interval = _multipart.validate_call(
+            state=state,
+            part_size=part_size,
+            on_state=on_state,
+            wait=wait,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+        expected = _recovery.normalize_expected_metadata(expected_metadata)
+        with ExitStack() as stack:
+            prepared = _multipart.prepare_source(file, identifier, stack)
+            digest = _multipart.hash_source(prepared, part_size)
+            if state is not None:
+                _multipart.check_resume(state, digest, identifier)
+            self._ensure_item_transport()
+            return self._run_multipart(
+                digest,
+                identifier,
+                state,
+                on_state,
+                wait=wait,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                expected=expected,
+                queue_derive=queue_derive,
+            )
+
+    @diagnostics.diagnostic_operation
+    def abort_multipart(self, state: InternetArchiveMultipartState) -> None:
+        """Abort an open multipart upload; never called automatically.
+
+        IAS3 queues a task to delete the uploaded parts. An upload that was
+        already completed, aborted, or expired fails with ``NoSuchUpload``.
+        """
+        self._ensure_open()
+        if not isinstance(state, InternetArchiveMultipartState):
+            raise InvalidOptionError("state must be an InternetArchiveMultipartState")
+        if state.phase is InternetArchiveMultipartPhase.COMPLETED:
+            raise InvalidOptionError("a completed multipart upload cannot be aborted")
+        self._ensure_item_transport()
+        try:
+            key = self._recovery_key()
+            response, text = self._multipart_call(
+                "DELETE",
+                _multipart.object_url(state.identifier, state.name),
+                key,
+                phase=_multipart.PHASE_ABORT,
+                mutation=True,
+                params={"uploadId": state.upload_id},
+            )
+            if response.status_code not in {HTTPStatus.OK, HTTPStatus.NO_CONTENT} or (
+                text
+            ):
+                raise InvalidServiceResponseError(
+                    "Internet Archive did not confirm the multipart abort",
+                    service=_common.SERVICE,
+                    status_code=response.status_code,
+                )
+        except ServiceError as exc:
+            raise InternetArchiveMultipartError(state, exc) from None
+
+    def _multipart_call(  # noqa: PLR0913 - Explicit request fields.
+        self,
+        method: str,
+        url: str,
+        key: InternetArchiveApiKey,
+        *,
+        phase: str | None,
+        mutation: bool,
+        headers: Mapping[str, str] | None = None,
+        params: Mapping[str, str] | None = None,
+        data: Any = None,  # noqa: ANN401 - Niquests accepts heterogeneous bodies.
+        request_timeout: float | None = None,
+    ) -> tuple[niquests.Response, str]:
+        """Send one identity-isolated request and return its accepted text."""
+        explicit = dict(headers or {})
+        if mutation:
+            explicit["x-archive-interactive-priority"] = "1"
+        response = self._recovery_request(
+            method,
+            url,
+            key,
+            request_timeout=(
+                self._timeout if request_timeout is None else request_timeout
+            ),
+            mutation=mutation,
+            headers=explicit,
+            params=params,
+            data=data,
+            phase=phase,
+        )
+        typed = cast("ResponseLike", response)
+        _items.raise_for_item_status(typed)
+        return response, response_text(typed, service=_common.SERVICE)
+
+    def _run_multipart(  # noqa: PLR0912,PLR0913 - Multipart state machine.
+        self,
+        digest: _multipart.SourceDigest,
+        identifier: str,
+        state: InternetArchiveMultipartState | None,
+        on_state: Callable[[InternetArchiveMultipartState], object] | None,
+        *,
+        wait: bool,
+        timeout: float,
+        poll_interval: float,
+        queue_derive: bool,
+        options: InternetArchiveUploadOptions | None = None,
+        expected: Mapping[str, InternetArchiveMetadataValue] | None = None,
+    ) -> InternetArchiveMultipartResult:
+        current = state
+        verified = False
+        uncertain = False
+
+        def publish(new: InternetArchiveMultipartState) -> None:
+            nonlocal current
+            current = new
+            if on_state is not None:
+                on_state(new)
+
+        def result() -> InternetArchiveMultipartResult:
+            return InternetArchiveMultipartResult(
+                identifier,
+                digest.name,
+                digest.size,
+                digest.md5,
+                digest.sha1,
+                state=current,
+                verified=verified,
+            )
+
+        try:
+            key = self._recovery_key()
+            if current is None:
+                deadline = time.monotonic() + timeout
+                if options is not None:
+                    self._create_multipart_item(key, options, digest.size)
+                elif self._multipart_file_present(
+                    key,
+                    digest,
+                    identifier,
+                    cast("Mapping[str, InternetArchiveMetadataValue]", expected),
+                    deadline=deadline,
+                    timeout=timeout,
+                    poll_interval=poll_interval,
+                ):
+                    verified = True
+                    return result()
+                upload_id = self._initiate_multipart(
+                    key,
+                    digest,
+                    identifier,
+                    retry_missing_bucket=options is not None,
+                    deadline=deadline,
+                    timeout=timeout,
+                    poll_interval=poll_interval,
+                )
+                publish(
+                    _multipart.new_state(
+                        digest, identifier, upload_id, queue_derive=queue_derive
+                    )
+                )
+            elif current.phase is not InternetArchiveMultipartPhase.COMPLETED:
+                try:
+                    listed = self._list_multipart_parts(key, current)
+                except ServiceError as exc:
+                    if (
+                        current.phase is not InternetArchiveMultipartPhase.COMPLETING
+                        or exc.service_code != _multipart.NO_SUCH_UPLOAD
+                    ):
+                        raise
+                    # The upload ID is gone: completed, aborted, or expired.
+                    exc.request_phase = _multipart.PHASE_LIST
+                    evidence = self._multipart_completion_evidence(key, current)
+                    if evidence is None:
+                        uncertain = True
+                        raise
+                    verified = evidence
+                    publish(
+                        replace(current, phase=InternetArchiveMultipartPhase.COMPLETED)
+                    )
+                else:
+                    reconciled = _multipart.reconcile_parts(current, listed, digest)
+                    if reconciled != current:
+                        publish(reconciled)
+            assert current is not None
+            if current.phase is InternetArchiveMultipartPhase.INITIATED:
+                for number in _multipart.missing_parts(current):
+                    publish(
+                        _multipart.with_part(
+                            current,
+                            self._put_multipart_part(key, current, digest, number),
+                        )
+                    )
+                publish(
+                    replace(current, phase=InternetArchiveMultipartPhase.COMPLETING)
+                )
+                self._complete_multipart(key, current)
+                publish(replace(current, phase=InternetArchiveMultipartPhase.COMPLETED))
+            if wait and not verified:
+                self._verify_multipart(
+                    key, current, timeout=timeout, poll_interval=poll_interval
+                )
+                verified = True
+            return result()
+        except ServiceError as exc:
+            raise InternetArchiveMultipartError(
+                current, exc, uncertain=uncertain
+            ) from None
+
+    def _create_multipart_item(
+        self,
+        key: InternetArchiveApiKey,
+        options: InternetArchiveUploadOptions,
+        size: int,
+    ) -> None:
+        """Claim a new identifier with ``upload``'s create-only bucket PUT."""
+        headers = _items.upload_headers(options, size)
+        headers.update(
+            {
+                "Content-Type": "application/octet-stream",
+                "Content-Length": "0",
+                "x-archive-queue-derive": "0",
+            }
+        )
+        response, text = self._multipart_call(
+            "PUT",
+            _multipart.bucket_url(options.identifier),
+            key,
+            phase=None,
+            mutation=True,
+            headers=headers,
+            data=b"",
+        )
+        if response.status_code != HTTPStatus.OK or text:
+            raise InvalidServiceResponseError(
+                "Internet Archive did not confirm item creation",
+                service=_common.SERVICE,
+                status_code=response.status_code,
+            )
+
+    def _multipart_file_present(  # noqa: PLR0913 - Explicit deadline fields.
+        self,
+        key: InternetArchiveApiKey,
+        digest: _multipart.SourceDigest,
+        identifier: str,
+        expected: Mapping[str, InternetArchiveMetadataValue],
+        *,
+        deadline: float,
+        timeout: float,
+        poll_interval: float,
+    ) -> bool:
+        """Apply ``add_files`` reconciliation; return whether the file matches."""
+        response, _ = self._multipart_call(
+            "GET",
+            _common.USER_INFO_URL,
+            key,
+            phase=None,
+            mutation=False,
+            params={"op": "whoami"},
+            request_timeout=self._remaining(deadline, identifier, timeout),
+        )
+        identity = _recovery.parse_identity(
+            response_mapping(cast("ResponseLike", response), service=_common.SERVICE)
+        )
+        recovery_file = _recovery.PreparedRecoveryFile(
+            digest.file, digest.offset, digest.md5, digest.sha1
+        )
+        while True:
+            item = self._multipart_item(
+                key, identifier, self._remaining(deadline, identifier, timeout)
+            )
+            catalog, _ = self._multipart_call(
+                "GET",
+                _items.UPLOAD_API_URL,
+                key,
+                phase=None,
+                mutation=False,
+                params={"name": "catalogRows", "identifier": identifier},
+                request_timeout=self._remaining(deadline, identifier, timeout),
+            )
+            catalog_complete = _items.parse_catalog(
+                response_mapping(cast("ResponseLike", catalog), service=_common.SERVICE)
+            )
+            try:
+                decision = _recovery.reconcile(
+                    item,
+                    identity,
+                    expected,
+                    (recovery_file,),
+                    catalog_complete=catalog_complete,
+                )
+            except _recovery.RecoveryDecisionError as exc:
+                if not exc.deferred:
+                    raise ServiceError(str(exc), service=_common.SERVICE) from None
+                time.sleep(
+                    min(poll_interval, self._remaining(deadline, identifier, timeout))
+                )
+                continue
+            return (
+                decision.dispositions[digest.name]
+                is InternetArchiveFileDisposition.ALREADY_MATCHING
+            )
+
+    @staticmethod
+    def _remaining(deadline: float, identifier: str, timeout: float) -> float:
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise PollingTimeoutError(
+                "Internet Archive multipart upload waited longer than "
+                f"{timeout:g} seconds",
+                service=_common.SERVICE,
+                job_id=identifier,
+                timeout=timeout,
+            )
+        return value
+
+    def _initiate_multipart(  # noqa: PLR0913 - Explicit deadline fields.
+        self,
+        key: InternetArchiveApiKey,
+        digest: _multipart.SourceDigest,
+        identifier: str,
+        *,
+        retry_missing_bucket: bool,
+        deadline: float,
+        timeout: float,
+        poll_interval: float,
+    ) -> str:
+        """Initiate, waiting out ``NoSuchBucket`` while a new item is created."""
+        while True:
+            try:
+                _, text = self._multipart_call(
+                    "POST",
+                    _multipart.object_url(identifier, digest.name) + "?uploads",
+                    key,
+                    phase=_multipart.PHASE_INITIATE,
+                    mutation=True,
+                    headers=_multipart.initiate_headers(digest.size),
+                    data=b"",
+                )
+            except ServiceError as exc:
+                if (
+                    not retry_missing_bucket
+                    or exc.service_code != _multipart.NO_SUCH_BUCKET
+                ):
+                    raise
+                time.sleep(
+                    min(poll_interval, self._remaining(deadline, identifier, timeout))
+                )
+                self._remaining(deadline, identifier, timeout)
+                continue
+            return _multipart.parse_initiate(text, identifier, digest.name)
+
+    def _list_multipart_parts(
+        self, key: InternetArchiveApiKey, state: InternetArchiveMultipartState
+    ) -> dict[int, tuple[str, int]]:
+        _, text = self._multipart_call(
+            "GET",
+            _multipart.object_url(state.identifier, state.name),
+            key,
+            phase=_multipart.PHASE_LIST,
+            mutation=False,
+            params={"uploadId": state.upload_id},
+        )
+        return _multipart.parse_list_parts(text, state)
+
+    def _put_multipart_part(
+        self,
+        key: InternetArchiveApiKey,
+        state: InternetArchiveMultipartState,
+        digest: _multipart.SourceDigest,
+        number: int,
+    ) -> InternetArchiveMultipartPart:
+        body = digest.part_body(number)
+        response, text = self._multipart_call(
+            "PUT",
+            _multipart.object_url(state.identifier, state.name),
+            key,
+            phase=_multipart.PHASE_PART,
+            mutation=True,
+            headers=_multipart.part_headers(body.size),
+            params={"partNumber": str(number), "uploadId": state.upload_id},
+            data=body,
+        )
+        if response.status_code != HTTPStatus.OK or text:
+            raise InvalidServiceResponseError(
+                "Internet Archive did not confirm a multipart part",
+                service=_common.SERVICE,
+                status_code=response.status_code,
+            )
+        return _multipart.acknowledged_part(
+            response.headers.get("ETag"), digest, number
+        )
+
+    def _complete_multipart(
+        self, key: InternetArchiveApiKey, state: InternetArchiveMultipartState
+    ) -> None:
+        response, text = self._multipart_call(
+            "POST",
+            _multipart.object_url(state.identifier, state.name),
+            key,
+            phase=_multipart.PHASE_COMPLETE,
+            mutation=True,
+            headers=_multipart.complete_headers(state),
+            params={"uploadId": state.upload_id},
+            data=_multipart.complete_body(state),
+        )
+        if response.status_code != HTTPStatus.OK:
+            raise InvalidServiceResponseError(
+                "Internet Archive did not confirm the multipart completion",
+                service=_common.SERVICE,
+                status_code=response.status_code,
+            )
+        _multipart.parse_complete(text, state.identifier, state.name)
+
+    def _multipart_item(
+        self, key: InternetArchiveApiKey, identifier: str, request_timeout: float
+    ) -> InternetArchiveItem:
+        response = self._recovery_request(
+            "GET",
+            f"{_recovery.METADATA_URL}/{identifier}",
+            key,
+            request_timeout=request_timeout,
+            params={"extended_err": "1"},
+        )
+        typed = cast("ResponseLike", response)
+        if (
+            typed.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR
+            or typed.status_code in {401, 403, 429}
+            or HTTPStatus.MULTIPLE_CHOICES <= typed.status_code < HTTPStatus.BAD_REQUEST
+        ):
+            _items.raise_for_item_status(typed)
+        return _recovery.parse_item(
+            response_mapping(typed, service=_common.SERVICE),
+            identifier,
+            status_code=typed.status_code,
+        )
+
+    def _multipart_completion_evidence(
+        self, key: InternetArchiveApiKey, state: InternetArchiveMultipartState
+    ) -> bool | None:
+        """Return ``True`` for a verified file, ``False`` for a completion task.
+
+        ``None`` means neither was found, so the outcome stays uncertain.
+        """
+        item = self._multipart_item(key, state.identifier, self._timeout)
+        if _multipart.file_status(item, state):
+            return True
+        response, _ = self._multipart_call(
+            "GET",
+            _multipart.TASKS_URL,
+            key,
+            phase=_multipart.PHASE_EVIDENCE,
+            mutation=False,
+            params=_multipart.task_params(state.identifier),
+        )
+        if _multipart.completion_task_found(
+            response_mapping(cast("ResponseLike", response), service=_common.SERVICE),
+            state.upload_id,
+        ):
+            return False
+        return None
+
+    def _verify_multipart(
+        self,
+        key: InternetArchiveApiKey,
+        state: InternetArchiveMultipartState,
+        *,
+        timeout: float,
+        poll_interval: float,
+    ) -> None:
+        """Poll metadata until the assembled file matches the source."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = self._remaining(deadline, state.identifier, timeout)
+            status = _multipart.file_status(
+                self._multipart_item(key, state.identifier, remaining), state
+            )
+            if status is False:
+                raise InvalidServiceResponseError(
+                    "Internet Archive assembled a file that does not match the source",
+                    service=_common.SERVICE,
+                )
+            if status:
+                return
+            time.sleep(
+                min(poll_interval, self._remaining(deadline, state.identifier, timeout))
+            )
 
     @diagnostics.diagnostic_operation
     def remove_items(

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
-from typing import BinaryIO, TypeAlias
+from typing import Any, BinaryIO, TypeAlias, cast
 from unicodedata import category
 
 from archivist.core.errors import (
@@ -67,11 +67,16 @@ class InternetArchiveItemAvailability(StrEnum):
 
 
 class InternetArchiveItemFileSource(StrEnum):
-    """The server-reported or filename-derived source of an item file."""
+    """The server-reported or filename-derived source of an item file.
+
+    ``SPOOL`` marks the ``__ia_spool/`` part files IAS3 stores while a multipart
+    upload is open. IA reports them as originals; they disappear on assembly.
+    """
 
     ORIGINAL = "original"
     DERIVATIVE = "derivative"
     GENERATED = "generated"
+    SPOOL = "spool"
     UNKNOWN = "unknown"
 
 
@@ -537,6 +542,232 @@ class InternetArchiveRecoveryDeferredError(InternetArchiveRecoveryError):
         """Retain the unresolved phase without implying that a write occurred."""
         super().__init__(result, cause, phase=phase)
         self.args = ("Internet Archive file recovery was deferred",)
+
+
+class InternetArchiveMultipartPhase(StrEnum):
+    """Where a multipart upload stands, as last persisted by the caller."""
+
+    INITIATED = "initiated"
+    COMPLETING = "completing"
+    COMPLETED = "completed"
+
+
+_MULTIPART_STATE_VERSION = 1
+_MULTIPART_MAX_PARTS = 1000
+_QUOTED_MD5 = re.compile(r'"[0-9a-f]{32}"')
+_MD5_HEX = re.compile(r"[0-9a-f]{32}")
+_SHA1_HEX = re.compile(r"[0-9a-f]{40}")
+
+
+def _positive_int(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise InvalidOptionError(f"{name} must be a positive integer")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveMultipartPart:
+    """One part acknowledged by IAS3: its number, quoted-MD5 ETag, and size."""
+
+    number: int
+    etag: str
+    size: int
+
+    def __post_init__(self) -> None:
+        """Require a positive part number and size and a quoted lowercase MD5."""
+        _positive_int(self.number, "part number")
+        _positive_int(self.size, "part size")
+        if not isinstance(self.etag, str) or _QUOTED_MD5.fullmatch(self.etag) is None:
+            raise InvalidOptionError("part etag must be a quoted lowercase MD5")
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveMultipartState:
+    """Serializable resume state for one multipart upload of one file.
+
+    Persist it each time ``on_state`` delivers a new value, before the upload
+    continues. ``md5`` and ``sha1`` fingerprint the whole source; a resumed call
+    rehashes the source and refuses to continue when they differ. ``parts``
+    holds only parts whose ETag matched the local MD5 of their byte range.
+    """
+
+    identifier: str
+    name: str
+    upload_id: str
+    size: int
+    part_size: int
+    md5: str
+    sha1: str
+    queue_derive: bool = True
+    phase: InternetArchiveMultipartPhase = InternetArchiveMultipartPhase.INITIATED
+    parts: tuple[InternetArchiveMultipartPart, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject states that could not have come from a valid upload."""
+        _validate_identifier(self.identifier)
+        _validate_file_name(self.name)
+        _validate_text(self.upload_id, "upload_id")
+        _positive_int(self.size, "size")
+        _positive_int(self.part_size, "part_size")
+        if self.part_count > _MULTIPART_MAX_PARTS:
+            raise InvalidOptionError(
+                f"a multipart upload can have at most {_MULTIPART_MAX_PARTS} parts"
+            )
+        if not isinstance(self.md5, str) or _MD5_HEX.fullmatch(self.md5) is None:
+            raise InvalidOptionError("md5 must be a lowercase hexadecimal MD5")
+        if not isinstance(self.sha1, str) or _SHA1_HEX.fullmatch(self.sha1) is None:
+            raise InvalidOptionError("sha1 must be a lowercase hexadecimal SHA-1")
+        if not isinstance(self.queue_derive, bool):
+            raise InvalidOptionError("queue_derive must be a boolean")
+        if not isinstance(self.phase, InternetArchiveMultipartPhase):
+            raise InvalidOptionError("phase must be an InternetArchiveMultipartPhase")
+        parts = tuple(self.parts)
+        if any(not isinstance(part, InternetArchiveMultipartPart) for part in parts):
+            raise InvalidOptionError("parts must contain multipart part values")
+        numbers = [part.number for part in parts]
+        if numbers != sorted(set(numbers)):
+            raise InvalidOptionError("parts must be unique and in ascending order")
+        for part in parts:
+            if part.number > self.part_count or part.size != self.part_length(
+                part.number
+            ):
+                raise InvalidOptionError("part does not fit the upload's layout")
+        if (
+            self.phase is not InternetArchiveMultipartPhase.INITIATED
+            and len(parts) != self.part_count
+        ):
+            raise InvalidOptionError("completion requires every part")
+        object.__setattr__(self, "parts", parts)
+
+    @property
+    def part_count(self) -> int:
+        """Return how many parts the source is divided into."""
+        return -(-self.size // self.part_size)
+
+    def part_length(self, number: int) -> int:
+        """Return the byte length of one part; only the last part can be short."""
+        if number == self.part_count:
+            return self.size - self.part_size * (number - 1)
+        return self.part_size
+
+    @property
+    def details_url(self) -> str:
+        """Return the Archive.org item page URL."""
+        return f"https://archive.org/details/{self.identifier}"
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-compatible mapping accepted by ``from_dict``."""
+        return {
+            "version": _MULTIPART_STATE_VERSION,
+            "identifier": self.identifier,
+            "name": self.name,
+            "upload_id": self.upload_id,
+            "size": self.size,
+            "part_size": self.part_size,
+            "md5": self.md5,
+            "sha1": self.sha1,
+            "queue_derive": self.queue_derive,
+            "phase": self.phase.value,
+            "parts": [[part.number, part.etag, part.size] for part in self.parts],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> InternetArchiveMultipartState:
+        """Rebuild a state saved by ``to_dict``, validating every field."""
+        if not isinstance(data, Mapping):
+            raise InvalidOptionError("multipart state must be a mapping")
+        if data.get("version") != _MULTIPART_STATE_VERSION:
+            raise InvalidOptionError("unsupported multipart state version")
+        fields = {
+            "identifier",
+            "name",
+            "upload_id",
+            "size",
+            "part_size",
+            "md5",
+            "sha1",
+            "queue_derive",
+            "phase",
+            "parts",
+        }
+        if set(data) != fields | {"version"}:
+            raise InvalidOptionError("multipart state has missing or unknown fields")
+        values = cast("dict[str, Any]", data)
+        raw_parts = values["parts"]
+        if not isinstance(raw_parts, list) or any(
+            not isinstance(entry, list) or len(entry) != 3  # noqa: PLR2004
+            for entry in raw_parts
+        ):
+            raise InvalidOptionError(
+                "multipart state parts must be [number, etag, size] lists"
+            )
+        phase = values["phase"]
+        if not isinstance(phase, str) or phase not in {
+            member.value for member in InternetArchiveMultipartPhase
+        }:
+            raise InvalidOptionError("multipart state has an unknown phase")
+        return cls(
+            identifier=values["identifier"],
+            name=values["name"],
+            upload_id=values["upload_id"],
+            size=values["size"],
+            part_size=values["part_size"],
+            md5=values["md5"],
+            sha1=values["sha1"],
+            queue_derive=values["queue_derive"],
+            phase=InternetArchiveMultipartPhase(phase),
+            parts=tuple(InternetArchiveMultipartPart(*entry) for entry in raw_parts),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveMultipartResult:
+    """The outcome of a multipart call that reached an accepted completion.
+
+    ``state`` is ``None`` only when ``add_file_multipart`` found the exact file
+    already present and uploaded nothing. ``verified`` is ``True`` when item
+    metadata showed the file with the source's size and MD5.
+    """
+
+    identifier: str
+    name: str
+    size: int
+    md5: str
+    sha1: str
+    state: InternetArchiveMultipartState | None = None
+    verified: bool = False
+
+    @property
+    def details_url(self) -> str:
+        """Return the Archive.org item page URL."""
+        return f"https://archive.org/details/{self.identifier}"
+
+
+class InternetArchiveMultipartError(ServiceError):
+    """A multipart failure retaining the latest resume state and its cause.
+
+    ``state`` is ``None`` when the failure came before IAS3 issued an upload ID.
+    Otherwise pass it back as ``state=`` to resume. ``uncertain`` is ``True``
+    when the upload ID is gone but no completion evidence was found: resuming
+    cannot decide the outcome, and the caller must reconcile the item itself.
+    """
+
+    def __init__(
+        self,
+        state: InternetArchiveMultipartState | None,
+        cause: ServiceError,
+        *,
+        uncertain: bool = False,
+    ) -> None:
+        """Retain the cause (including diagnostics) without server text."""
+        super().__init__(
+            "Internet Archive multipart upload failed",
+            service="Internet Archive",
+            status_code=cause.status_code,
+        )
+        self.state = state
+        self.cause = cause
+        self.uncertain = uncertain
 
 
 # ``add_files`` aliases make the operation-specific names available while the

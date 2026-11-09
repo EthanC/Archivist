@@ -41,13 +41,19 @@ _CONTEXT: ContextVar[_RequestContext | None] = ContextVar(
 )
 
 
-def begin_request(method: str, url: str) -> None:
-    """Clear stale response context and identify the step about to start."""
+def begin_request(method: str, url: str, phase: str | None = None) -> None:
+    """Clear stale response context and identify the step about to start.
+
+    An explicit ``phase`` names requests that share a URL with another step,
+    such as multipart calls on an object URL.
+    """
     context = _CONTEXT.get()
     if context is None:
         return
     context.response = None
-    if url == _common.CSRF_URL:
+    if phase is not None:
+        pass
+    elif url == _common.CSRF_URL:
         phase = "csrf"
     elif url == _common.LOGIN_URL:
         phase = "login"

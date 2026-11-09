@@ -359,6 +359,12 @@ The sync and async clients use these phase strings:
 | `item-metadata` | Metadata API lookup or failed reconciliation. |
 | `identity` | Authenticated `whoami` lookup. |
 | `upload-limit` | IAS3 `check_limit` query. |
+| `multipart-initiate` | Multipart upload initiation. |
+| `multipart-part` | One multipart part PUT. |
+| `multipart-list` | Multipart `ListParts` read on resume. |
+| `multipart-complete` | Multipart completion. |
+| `multipart-abort` | Explicit multipart abort. |
+| `multipart-evidence` | Tasks API read confirming a completion. |
 | `request` | Other requests, including uploader catalog polling. |
 
 Request phases describe transport steps. Recovery wrapper `.phase` retains the
@@ -514,6 +520,128 @@ Run one writer for an item across processes, restarts, manual edits, and other
 tools. Metadata can change between a read and a PUT, and the reviewed IAS3
 interface does not provide an atomic conditional no-overwrite guarantee.
 
+### Resumable multipart uploads
+
+`upload()` and `add_files()` send each file as one PUT, so a dropped connection
+loses the whole transfer. For large files, `upload_multipart()` and
+`add_file_multipart()` send one file in parts using IAS3's S3-style multipart
+protocol. A failure costs at most one part, and the call can resume from a
+saved state.
+
+```python
+import json
+from pathlib import Path
+
+from archivist import InternetArchiveMultipartError, InternetArchiveMultipartState
+
+state_file = Path("upload-state.json")
+
+
+def persist(state: InternetArchiveMultipartState) -> None:
+    state_file.write_text(json.dumps(state.to_dict()))
+
+
+saved = (
+    InternetArchiveMultipartState.from_dict(json.loads(state_file.read_text()))
+    if state_file.exists()
+    else None
+)
+with InternetArchiveClient(account=account) as client:
+    try:
+        result = client.upload_multipart(
+            Path("original.mp4"), options, state=saved, on_state=persist, wait=True
+        )
+    except InternetArchiveMultipartError as error:
+        print(error.state, error.uncertain, error.cause.request_phase)
+        raise
+print(result.verified)
+```
+
+- `upload_multipart(file, options, ...)` claims a new identifier with the same
+  create-only bucket PUT as `upload()`, then waits, within `timeout`, for IAS3 to
+  stop answering `NoSuchBucket` before initiating. It never uses
+  `x-archive-auto-make-bucket`, which live probing showed is not create-only.
+- `add_file_multipart(identifier, file, *, expected_metadata, ...)` targets an
+  existing item and applies the `add_files()` ownership, provenance, and
+  checksum checks first. If the exact file is already present, it returns a
+  verified result with `state=None` and uploads nothing.
+
+`on_state` receives a new `InternetArchiveMultipartState` after the upload is
+initiated, after every acknowledged part, before completion is sent, and after
+it is accepted. Persist each one before returning; the call does not continue
+until `on_state` returns. The async client awaits `on_state` when it returns an
+awaitable. `to_dict()` and `from_dict()` convert a state to and from JSON-safe
+values; `from_dict()` validates every field.
+
+Pass the latest saved state as `state=` to resume, with the same identifier,
+file name, and unchanged source. The source is hashed again before any request,
+and a changed size, MD5, or SHA-1 raises `InvalidOptionError`. A resumed call
+skips ownership checks and item creation, because the saved upload ID already
+identifies the upload. It reads `ListParts` and keeps only parts whose ETag and
+size match the local MD5 of that byte range. That includes a part IAS3 stored
+after its acknowledgement was lost. Every other part is sent again, and
+acknowledged parts are never resent. `part_size` applies only to new uploads;
+a resumed upload keeps its saved part size.
+
+Completion needs care because IAS3 does not make a repeated completion
+idempotent: the second attempt returns `NoSuchUpload`, as an abort or expiry
+would. The client never resends a completion within one call. A failed
+completion leaves `state.phase` as `completing`, and resuming from that state
+checks `ListParts` first:
+
+- If the upload is still open, completion did not take effect, so the call
+  sends it again.
+- If the upload ID is gone, the call looks for evidence: the final file in item
+  metadata with the source's size and MD5 (`verified=True`), or a
+  non-failed `s3-put-complete-multipart` task for that upload ID in the
+  authenticated Tasks API (`verified=False`). With neither, it raises
+  `InternetArchiveMultipartError` with `uncertain=True` and uploads nothing.
+  Decide from your own records whether to start a new upload.
+
+IAS3 acknowledges completion within a second, but assembles the file later in
+a separate task. With `wait=True`, the call polls item metadata until the file
+shows the source's size and MD5, within `timeout`. A listed file with a
+different size or checksum raises an error. Keep local sources until the file
+is verified, not merely until completion is acknowledged. `timeout` bounds only
+the waits before the first part and after completion; part transfers are
+bounded by the client's per-request timeout.
+
+`abort_multipart(state)` deletes an open upload's parts. The client never aborts
+on its own. Aborting a completed, aborted, or expired upload fails with
+`NoSuchUpload`.
+
+IAS3 behavior probed live on 2026-11-09, which the client relies on:
+
+- Every part PUT, including a resent part, queues its own `s3-put` catalog
+  task. The initiate, the completion, and an abort each queue one more. A file
+  in N parts therefore queues about N+2 tasks where a single PUT queues one, so
+  `SlowDown` throttling makes large parts preferable. The default `part_size`
+  is 512 MiB.
+- `x-archive-queue-derive` takes effect only on the completion request, so the
+  derive choice (`options.queue_derive`, or `queue_derive=` for
+  `add_file_multipart()`) is saved in the state and sent on completion.
+- IAS3 accepted 1 MiB non-final parts, so the client enforces no minimum part
+  size. It caps parts at 5 GiB, Amazon S3's limit, because IA's own limit is
+  undocumented. It also caps uploads at 1000 parts, the size of one
+  `ListParts` page, because IA's paging was not verified.
+- While an upload is open, its parts appear in item metadata as
+  `__ia_spool/<upload ID>_<NNNNN>_ias3_part.bin` files reported as originals.
+  `get_item()` classifies them as `InternetArchiveItemFileSource.SPOOL`, so
+  `original_files` excludes them. File names under `__ia_spool/` are rejected
+  for multipart uploads. The extra tasks keep an item's tasks pending, so
+  `add_files()` on the same item defers until the upload finishes.
+
+Every multipart mutation sends `x-archive-interactive-priority: 1`, matching
+`upload()`. Requests follow the identity-isolated recovery transport: the LOW
+key pair only, no session cookies, no redirects, and no retries. Service failures
+raise `InternetArchiveMultipartError` with the latest `state` (or `None` before
+an upload ID exists), `cause`, and `uncertain`. HTTP 503 `SlowDown` keeps its
+`service_code` and `retry_after` on `cause`, as for `upload()`.
+
+If item creation succeeded but initiation never did, there is no state to
+resume. Calling `upload_multipart()` again then fails with HTTP 409; continue
+with `add_file_multipart()` and the item's provenance metadata instead.
+
 ### Ingest polling
 
 With `wait=False`, the result records file transfers and has
@@ -599,7 +727,8 @@ Normal tests do not load `.env` or contact Archive.org. Item lifecycle tests
 require **both** `ARCHIVIST_RUN_LIVE=1` and `ARCHIVIST_RUN_LIVE_MUTATIONS=1`, plus
 `INTERNET_ARCHIVE_EMAIL` and `INTERNET_ARCHIVE_PASSWORD` in the environment.
 They cover single- and multi-file uploads with both clients, verify metadata and
-downloaded bytes, then verify the unique `source` marker before requesting
+downloaded bytes, and interrupt and resume a three-part multipart upload
+(`tests/live/test_multipart.py`), then verify the unique `source` marker before requesting
 removal and polling for darkness. Ownership recovery also runs after upload
 failures, cancellation, and keyboard interruption. Cleanup is shielded from
 cancellation and bounded to 65 minutes, including up to 60 minutes waiting for
@@ -613,7 +742,7 @@ For PowerShell, after securely providing the account environment variables:
 ```powershell
 $env:ARCHIVIST_RUN_LIVE = "1"
 $env:ARCHIVIST_RUN_LIVE_MUTATIONS = "1"
-uv run pytest tests/live/test_items.py -m live --no-cov
+uv run pytest tests/live/test_items.py tests/live/test_multipart.py -m live --no-cov
 ```
 
 Do not enable these gates in ordinary CI or enable transport debug logs. These

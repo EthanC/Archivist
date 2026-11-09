@@ -14,11 +14,13 @@ from pathlib import Path
 from threading import Thread
 from typing import cast
 from urllib.parse import parse_qs, unquote, urlsplit
+from xml.etree import ElementTree
 
 import pytest
 
 from archivist.services.internet_archive import _common as ia_common
 from archivist.services.internet_archive import _items as ia_items
+from archivist.services.internet_archive import _multipart as ia_multipart
 from archivist.services.internet_archive import _recovery as ia_recovery
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -41,6 +43,32 @@ class RecordedRequest:
 
 
 @dataclass(slots=True)
+class MultipartUpload:
+    """One open fixture multipart upload and its received part bodies."""
+
+    bucket: str
+    key: str
+    parts: dict[int, bytes] = field(default_factory=dict)
+
+
+S3_NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
+
+
+def s3_error(code: str) -> str:
+    """Return S3-style error XML like the IAS3 responses observed live."""
+    return (
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        f"<Error><Code>{code}</Code><Message>fixture {code}</Message>"
+        "<RequestId>fixture-request-id</RequestId></Error>"
+    )
+
+
+def quoted_md5(body: bytes) -> str:
+    """Return the quoted MD5 IAS3 uses as a part ETag."""
+    return f'"{md5(body, usedforsecurity=False).hexdigest()}"'
+
+
+@dataclass(slots=True)
 class ServerState:
     """Track fixture server requests and capture polling state."""
 
@@ -54,6 +82,14 @@ class ServerState:
     item_responses: dict[tuple[str, str], tuple[int, str, dict[str, str]]] = field(
         default_factory=dict
     )
+    # One-shot overrides consumed in request order; None lets a request through.
+    queued_responses: dict[
+        tuple[str, str], list[tuple[int, str, dict[str, str]] | None]
+    ] = field(default_factory=dict)
+    missing_bucket_initiates: dict[str, int] = field(default_factory=dict)
+    multipart_uploads: dict[str, MultipartUpload] = field(default_factory=dict)
+    completed_uploads: list[tuple[str, str]] = field(default_factory=list)
+    upload_counter: int = 0
 
     def matching(self, path: str, method: str | None = None) -> list[RecordedRequest]:
         """Return requests matching a path and optional HTTP method."""
@@ -343,13 +379,120 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if not self._handle_item_request(request):
             self._send(404, "not found")
 
+    def do_DELETE(self) -> None:
+        """Serve multipart aborts."""
+        request = self._record()
+        if not self._handle_item_request(request):
+            self._send(404, "not found")
+
+    def _xml(self, status: int, body: str) -> None:
+        self._send(status, body, content_type="application/xml")
+
+    def _handle_multipart(self, request: RecordedRequest) -> bool:  # noqa: PLR0911 - Fixture endpoint dispatch.
+        """Emulate the IAS3 multipart behavior probed live on 2026-11-09."""
+        bucket, separator, raw_key = request.path.removeprefix("/ia/s3/").partition("/")
+        if not separator:
+            return False
+        key = unquote(raw_key)
+        target = f"<Bucket>{bucket}</Bucket><Key>{escape(key)}</Key>"
+        if request.method == "POST" and "uploads" in request.query:
+            remaining = self.state.missing_bucket_initiates.get(bucket, 0)
+            if bucket not in self.state.item_buckets or remaining:
+                self.state.missing_bucket_initiates[bucket] = max(remaining - 1, 0)
+                self._xml(404, s3_error("NoSuchBucket"))
+                return True
+            self.state.upload_counter += 1
+            upload_id = f"upload-{self.state.upload_counter}"
+            self.state.multipart_uploads[upload_id] = MultipartUpload(bucket, key)
+            self._xml(
+                200,
+                f'<InitiateMultipartUploadResult xmlns="{S3_NAMESPACE}">{target}'
+                f"<UploadId>{upload_id}</UploadId></InitiateMultipartUploadResult>",
+            )
+            return True
+        upload_id = request.query.get("uploadId", [None])[0]
+        if upload_id is None:
+            return False
+        upload = self.state.multipart_uploads.get(upload_id)
+        if upload is None or (upload.bucket, upload.key) != (bucket, key):
+            self._xml(404, s3_error("NoSuchUpload"))
+            return True
+        if request.method == "PUT":
+            upload.parts[int(request.query["partNumber"][0])] = request.body
+            self._send(200, headers={"ETag": quoted_md5(request.body)})
+        elif request.method == "GET":
+            parts = "".join(
+                f"<Part><PartNumber>{number}</PartNumber>"
+                f"<ETag>{quoted_md5(body)}</ETag><Size>{len(body)}</Size></Part>"
+                for number, body in sorted(upload.parts.items())
+            )
+            self._xml(
+                200,
+                f'<ListPartsResult xmlns="{S3_NAMESPACE}">{target}'
+                f"<UploadId>{upload_id}</UploadId><IsTruncated>false</IsTruncated>"
+                f"{parts}</ListPartsResult>",
+            )
+        elif request.method == "POST":
+            assembled = b""
+            for part in ElementTree.fromstring(request.body):
+                body = upload.parts.get(int(part.findtext("PartNumber") or "0"))
+                if body is None or part.findtext("ETag") != quoted_md5(body):
+                    self._xml(400, s3_error("InvalidPart"))
+                    return True
+                assembled += body
+            del self.state.multipart_uploads[upload_id]
+            self.state.item_files.setdefault(bucket, {})[key] = assembled
+            self.state.completed_uploads.append((bucket, upload_id))
+            self._xml(
+                200,
+                f'<CompleteMultipartUploadResult xmlns="{S3_NAMESPACE}">'
+                f"<Location>fixture</Location>{target}"
+                "<ETag>1794197299.299</ETag></CompleteMultipartUploadResult>",
+            )
+        else:
+            del self.state.multipart_uploads[upload_id]
+            self._send(204)
+        return True
+
     def _handle_item_request(self, request: RecordedRequest) -> bool:  # noqa: PLR0912,PLR0915 - Fixture endpoint dispatch.
+        queue = self.state.queued_responses.get((request.method, request.path))
+        if queue:
+            queued = queue.pop(0)
+            if queued is not None:
+                status, body, headers = queued
+                self._send(status, body, headers=dict(headers))
+                return True
         override = self.state.item_responses.get((request.method, request.path))
         if override is not None:
             status, body, headers = override
             self._send(status, body, headers=dict(headers))
             return True
-        if request.path == "/ia/upload" and request.method == "GET":
+        if request.path.startswith("/ia/s3/") and self._handle_multipart(request):
+            return True
+        if request.path == "/ia/tasks" and request.method == "GET":
+            identifier = request.query.get("identifier", [""])[0]
+            self._json(
+                200,
+                {
+                    "success": True,
+                    "value": {
+                        "catalog": [],
+                        "history": [
+                            {
+                                "cmd": "archive.php",
+                                "status": None,
+                                "args": {
+                                    "comment": "s3-put-complete-multipart",
+                                    "complete_multipart_upload_id": upload_id,
+                                },
+                            }
+                            for bucket, upload_id in self.state.completed_uploads
+                            if bucket == identifier
+                        ],
+                    },
+                },
+            )
+        elif request.path == "/ia/upload" and request.method == "GET":
             args = {
                 "s3user": {"s3accesskey": "dummy-access", "s3secretkey": "dummy-secret"}
             }
@@ -555,4 +698,5 @@ def ia_endpoints(
     monkeypatch.setattr(ia_items, "S3_URL", f"{base}/ia/s3")
     monkeypatch.setattr(ia_items, "MANAGE_URL", f"{base}/ia/manage/")
     monkeypatch.setattr(ia_recovery, "METADATA_URL", f"{base}/ia/metadata")
+    monkeypatch.setattr(ia_multipart, "TASKS_URL", f"{base}/ia/tasks")
     return archive_server
