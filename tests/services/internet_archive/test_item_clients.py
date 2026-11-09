@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable
+from dataclasses import replace
 from datetime import date
 from http import HTTPStatus
 from inspect import isawaitable
@@ -192,6 +193,40 @@ async def test_upload_binary_metadata_and_ingest(
     assert bool(ia_endpoints.matching("/ia/login", "POST")) == (
         authentication == "account"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_count", [1, 3])
+@pytest.mark.parametrize("queue_derive", [True, False])
+async def test_upload_queue_derive_controls_the_final_file_header(
+    ia_endpoints: ServerState,
+    item_client: Client,
+    file_count: int,
+    queue_derive: bool,
+) -> None:
+    """Suppress derive on every PUT only when the caller opts out."""
+    files = [
+        InternetArchiveUploadFile(BytesIO(PAYLOAD), f"file-{index}.bin")
+        for index in range(file_count)
+    ]
+    await resolve(
+        item_client.upload(files, replace(options(), queue_derive=queue_derive))
+    )
+    puts = [request for request in ia_endpoints.requests if request.method == "PUT"]
+    assert [request.path for request in puts] == [
+        "/ia/s3/fixture-item",
+        *(f"/ia/s3/fixture-item/file-{index}.bin" for index in range(file_count)),
+    ]
+    derive = [
+        {key.lower(): value for key, value in request.headers.items()}.get(
+            "x-archive-queue-derive"
+        )
+        for request in puts
+    ]
+    if queue_derive:
+        assert derive == ["0"] * file_count + [None]
+    else:
+        assert derive == ["0"] * (file_count + 1)
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,7 @@ _RESERVED_METADATA = frozenset(
         "test_item",
         "license",
         "metadata",
+        "queue_derive",
     }
 )
 
@@ -285,6 +286,11 @@ class InternetArchiveUploadOptions:
     Subjects and repeated metadata values are copied into lists. Custom metadata
     uses a read-only mapping. A missing collection selects the uploader default
     for the media type or test items.
+
+    ``queue_derive=False`` sends ``x-archive-queue-derive: 0`` on every PUT,
+    so the upload queues no derive task. The item then keeps only its original
+    files: no derivatives, thumbnails, or streaming formats exist until a derive
+    is queued separately. The default queues one derive after the last file.
     """
 
     identifier: str
@@ -301,6 +307,7 @@ class InternetArchiveUploadOptions:
     metadata: Mapping[str, str | list[str]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    queue_derive: bool = True
 
     def __post_init__(self) -> None:
         """Validate typed fields, collection choices, and custom metadata keys."""
@@ -323,6 +330,8 @@ class InternetArchiveUploadOptions:
                 _validate_text(value, name)
         if not isinstance(self.test_item, bool):
             raise InvalidOptionError("test_item must be a boolean")
+        if not isinstance(self.queue_derive, bool):
+            raise InvalidOptionError("queue_derive must be a boolean")
         if not isinstance(self.media_type, str) or self.media_type not in _COLLECTIONS:
             raise InvalidOptionError(
                 "media_type must be movies, audio, texts, software, image, or data"

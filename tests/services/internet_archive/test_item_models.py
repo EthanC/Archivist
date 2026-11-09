@@ -190,6 +190,19 @@ def test_test_item_requires_a_boolean(test_item: object) -> None:
         _options(test_item=test_item)
 
 
+def test_queue_derive_defaults_to_queueing() -> None:
+    """Keep the derive task by default and accept an explicit opt-out."""
+    assert _options().queue_derive is True
+    assert _options(queue_derive=False).queue_derive is False
+
+
+@pytest.mark.parametrize("queue_derive", [0, 1, None, "false", []])
+def test_queue_derive_requires_a_boolean(queue_derive: object) -> None:
+    """Reject truthy and falsey values that are not actual booleans."""
+    with pytest.raises(InvalidOptionError, match="queue_derive must be a boolean"):
+        _options(queue_derive=queue_derive)
+
+
 @pytest.mark.parametrize("media_type", [None, [], 1, "", "video", "Movies", "data\n"])
 def test_media_type_rejects_unknown_and_nonstring_values(media_type: object) -> None:
     """Restrict media types to the uploader choices, including runtime types."""
@@ -220,6 +233,7 @@ def test_media_type_rejects_unknown_and_nonstring_values(media_type: object) -> 
         "test_item",
         "license",
         "metadata",
+        "queue_derive",
     ],
 )
 def test_metadata_cannot_override_typed_or_server_owned_fields(key: str) -> None:

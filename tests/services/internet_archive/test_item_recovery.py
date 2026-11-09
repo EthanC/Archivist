@@ -288,6 +288,57 @@ async def test_recovery_suppresses_derivation_until_the_last_missing_file(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("names", [["a.bin"], ["a.bin", "b.bin"]])
+@pytest.mark.parametrize("queue_derive", [True, False])
+async def test_recovery_queue_derive_controls_the_final_file_header(
+    ia_endpoints: ServerState,
+    recovery_client: Client,
+    names: list[str],
+    queue_derive: bool,
+) -> None:
+    """Suppress derive on the last recovered file only when the caller opts out."""
+    existing_item(ia_endpoints)
+    result = await resolve(
+        recovery_client.add_files(
+            IDENTIFIER,
+            [InternetArchiveUploadFile(BytesIO(name.encode()), name) for name in names],
+            expected_metadata=EXPECTED,
+            queue_derive=queue_derive,
+        )
+    )
+    assert all(file.transferred for file in result.files)
+    puts = [request for request in ia_endpoints.requests if request.method == "PUT"]
+    derive = [
+        {name.lower(): value for name, value in request.headers.items()}.get(
+            "x-archive-queue-derive"
+        )
+        for request in puts
+    ]
+    if queue_derive:
+        assert derive == ["0"] * (len(names) - 1) + [None]
+    else:
+        assert derive == ["0"] * len(names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue_derive", [0, 1, None, "false"])
+async def test_recovery_queue_derive_requires_a_boolean(
+    ia_endpoints: ServerState, recovery_client: Client, queue_derive: object
+) -> None:
+    """Reject non-boolean derive settings before any request."""
+    with pytest.raises(InvalidOptionError, match="queue_derive must be a boolean"):
+        await resolve(
+            recovery_client.add_files(
+                IDENTIFIER,
+                [InternetArchiveUploadFile(BytesIO(b"data"), "file.bin")],
+                expected_metadata=EXPECTED,
+                queue_derive=cast("bool", queue_derive),
+            )
+        )
+    assert not ia_endpoints.requests
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("wait", [False, True])
 async def test_acknowledged_batch_file_must_be_visible_before_the_next_put(
     ia_endpoints: ServerState, recovery_client: Client, wait: bool

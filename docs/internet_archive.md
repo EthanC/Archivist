@@ -146,6 +146,7 @@ All list values are revalidated before upload.
 | `media_type` | `"data"` | One of `movies`, `audio`, `texts`, `software`, `image`, or `data`. |
 | `test_item` | `False` | Selects `test_collection`. Cannot be combined with another explicit collection. |
 | `metadata` | Empty mapping | Additional metadata, including `source`; each value is a nonblank string or nonempty list of nonblank strings. |
+| `queue_derive` | `True` | `False` suppresses the derive task for the whole upload. See [Derive tasks](#derive-tasks). |
 
 Without `test_item` or an explicit collection, the defaults are:
 
@@ -178,6 +179,51 @@ Bare path strings still require an iterable. `timeout` is the ingest-polling
 budget after transfer, not an overall upload deadline. The client's constructor `timeout`
 sets connection and read-inactivity timeouts for each request. Both timeout
 values and `poll_interval` must be positive finite numbers.
+
+### Derive tasks
+
+IA queues a derive task for an item after a file PUT unless the request sends
+`x-archive-queue-derive: 0`. Derive builds the item's derivatives, such as
+thumbnails and streaming formats. It runs in IA's shared catalog queue and can
+take hours for large video files.
+
+By default, the create PUT and every file PUT except the last send
+`x-archive-queue-derive: 0`, so an upload queues exactly one derive, after its
+final file. With `queue_derive=False`, every PUT sends the header and the upload
+queues no derive:
+
+```python
+options = InternetArchiveUploadOptions(
+    identifier="example-video-2026",
+    title="Example video",
+    description="A large original video.",
+    subjects=["example"],
+    media_type="movies",
+    queue_derive=False,
+)
+```
+
+The item then keeps only the uploaded originals and IA's generated metadata
+files. It has no derivatives, thumbnails, or streaming formats until a derive
+is queued. `add_files()` takes the same setting as a keyword argument; pass the
+value the item was uploaded with so recovery does not queue a derive the upload
+skipped.
+
+To derive the item later, submit a `derive.php` task through IA's
+[Tasks API](https://archive.org/developers/tasks.html) with the same LOW key
+pair. Archivist does not submit tasks.
+
+```python
+import niquests
+
+response = niquests.post(
+    "https://archive.org/services/tasks.php",
+    headers={"Authorization": f"LOW {access_key}:{secret_key}"},
+    json={"identifier": "example-video-2026", "cmd": "derive.php"},
+    timeout=30,
+)
+response.raise_for_status()
+```
 
 ### Streams and filenames
 
@@ -418,7 +464,9 @@ as upload polling: a response that continuously sends data can exceed the
 remaining wall-clock budget. Keep each source open, at the same starting
 position, and byte-for-byte unchanged until the call returns.
 
-Only missing paths are PUT. Recovery does not check identifier availability,
+Only missing paths are PUT. By default, the last missing file queues a derive
+task; pass `queue_derive=False` to suppress it on every PUT, as described in
+[Derive tasks](#derive-tasks). Recovery does not check identifier availability,
 create a bucket, mutate metadata, remove files, roll back acknowledged files,
 submit tasks, follow redirects, or retry a mutation. A lost PUT response marks
 that file `uncertain` and stops the call. Its ETag, when present, records only a

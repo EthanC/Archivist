@@ -394,17 +394,21 @@ class InternetArchiveClient:
         wait: bool = False,
         timeout: float = 300.0,
         poll_interval: float = 2.0,
+        queue_derive: bool = True,
     ) -> InternetArchiveRecoveryResult:
         """Recover missing files on an owned item after conservative reconciliation.
 
         Sources are hashed before network access and must remain unchanged until
         return. One deadline covers readiness, inter-file checks, ingest, and
         checksum verification. A synchronous response can still exceed the
-        deadline while continuously delivering data.
+        deadline while continuously delivering data. ``queue_derive=False``
+        suppresses the derive task on every PUT, matching the upload option.
         """
         self._ensure_open()
         if not isinstance(wait, bool):
             raise InvalidOptionError("wait must be a boolean")
+        if not isinstance(queue_derive, bool):
+            raise InvalidOptionError("queue_derive must be a boolean")
         timeout = _common.validate_duration(timeout, name="timeout", allow_zero=False)
         poll_interval = _common.validate_duration(
             poll_interval, name="poll_interval", allow_zero=False
@@ -651,7 +655,7 @@ class InternetArchiveClient:
                     "Content-Type": "application/octet-stream",
                     "Content-Length": str(current.size),
                 }
-                if len(missing) > 1:
+                if len(missing) > 1 or not queue_derive:
                     headers["x-archive-queue-derive"] = "0"
                 current.rewind()
                 try:
@@ -794,7 +798,7 @@ class InternetArchiveClient:
                 for index, file in enumerate(prepared):
                     failed_file = file.name
                     file_headers = {**headers, "Content-Length": str(file.size)}
-                    if index < len(prepared) - 1:
+                    if index < len(prepared) - 1 or not options.queue_derive:
                         file_headers["x-archive-queue-derive"] = "0"
                     response = self._request(
                         "PUT",
