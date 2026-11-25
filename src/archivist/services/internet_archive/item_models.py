@@ -793,3 +793,87 @@ class InternetArchiveMultipartError(ServiceError):
 InternetArchiveAddFilesFileResult = InternetArchiveRecoveryFileResult
 InternetArchiveAddFilesResult = InternetArchiveRecoveryResult
 InternetArchiveAddFilesError = InternetArchiveRecoveryError
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveTaskSummary:
+    """Catalog task counts for the authenticated account from the Tasks API.
+
+    Unlike the IAS3 ``check_limit`` reading, these counts include the catalog
+    backlog, such as queued ``derive.php`` tasks, that can make IA reject new
+    item writes with HTTP 503 SlowDown.
+    """
+
+    queued: int
+    running: int
+    error: int
+    paused: int
+
+    @property
+    def outstanding(self) -> int:
+        """Return tasks that have not finished: queued plus running."""
+        return self.queued + self.running
+
+
+class InternetArchiveTaskState(StrEnum):
+    """A catalog task run state; unrecognized values are never guessed."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    ERROR = "error"
+    PAUSED = "paused"
+    FINISHED = "finished"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveTaskSubmission:
+    """A queued derive task, or the one already pending for the item.
+
+    ``already_pending`` is ``True`` when a queued or running ``derive.php``
+    task was found and nothing was submitted. ``log_url`` is only reported for
+    a new submission; IA writes to it once the task starts running.
+    """
+
+    task_id: int
+    identifier: str
+    log_url: str | None = None
+    already_pending: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InternetArchiveTaskStatus:
+    """One catalog task as reported by the Tasks API.
+
+    ``wait_admin`` holds the integer run state for live rows, and
+    ``raw_state`` a bounded copy of whatever value IA sent, kept so an
+    ``UNKNOWN`` state can be diagnosed. ``submitted_at`` is UTC.
+
+    ``finished_at`` is always ``None``: IA reports no finish time, and a
+    ``FINISHED`` state comes from the task being listed in history.
+    ``finished_marker`` is the history row's integer ``finished`` value. It is
+    opaque and is not a Unix timestamp.
+    """
+
+    task_id: int
+    identifier: str
+    cmd: str
+    state: InternetArchiveTaskState
+    submitted_at: datetime.datetime
+    finished_at: datetime.datetime | None = None
+    server: str | None = None
+    wait_admin: int | None = None
+    raw_state: str | None = None
+    finished_marker: int | None = None
+
+
+class InternetArchiveTaskNotFoundError(ServiceError):
+    """The Tasks API listed no live or finished task with the requested ID."""
+
+    def __init__(self, task_id: int) -> None:
+        """Retain the requested task ID."""
+        super().__init__(
+            f"Internet Archive task {task_id} was not found",
+            service="Internet Archive",
+        )
+        self.task_id = task_id

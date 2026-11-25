@@ -101,6 +101,38 @@ provenance, filename, size, MD5, and SHA-1 checks. For upload recovery, options,
 and item removal, see the
 [Internet Archive guide](https://archivist.e3n.im/internet_archive/#upload-items).
 
+## Internet Archive tasks
+
+Read your account's catalog task backlog, queue a derive, and track it:
+
+```python
+from archivist import (
+    InternetArchiveApiKey,
+    InternetArchiveClient,
+    InternetArchiveTaskState,
+)
+
+key = InternetArchiveApiKey("access", "secret")
+with InternetArchiveClient(api_key=key) as client:
+    summary = client.task_summary()
+    print(summary.queued, summary.running, summary.error, summary.paused)
+    if summary.outstanding > 100:
+        print("catalog backlog is high; defer new items")
+
+    submission = client.queue_derive("your-unique-item-id")
+    status = client.task_status(submission.task_id)
+    print(status.state is InternetArchiveTaskState.FINISHED)
+```
+
+`upload_limit()` (IAS3 `check_limit`) doesn't count the catalog task backlog,
+so it can report room while IA rejects new items with `503 SlowDown`.
+`task_summary()` reads the backlog from the
+[Tasks API](https://archive.org/developers/tasks.html). `queue_derive()` returns
+the existing task with `already_pending=True` instead of submitting a second
+derive when your account already has one queued or running for the item, so a
+retry after a lost response is safe. Only `derive.php` can be submitted. See the
+[Internet Archive guide](https://archivist.e3n.im/internet_archive/#catalog-tasks).
+
 ## Archive.today
 
 Find the oldest Archive.today capture through its Memento interface:

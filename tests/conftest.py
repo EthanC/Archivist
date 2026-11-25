@@ -22,6 +22,7 @@ from archivist.services.internet_archive import _common as ia_common
 from archivist.services.internet_archive import _items as ia_items
 from archivist.services.internet_archive import _multipart as ia_multipart
 from archivist.services.internet_archive import _recovery as ia_recovery
+from archivist.services.internet_archive import _tasks as ia_tasks
 
 FIXTURES = Path(__file__).parent / "fixtures"
 IA_SUCCESS_STATUS = json.loads(
@@ -699,4 +700,5 @@ def ia_endpoints(
     monkeypatch.setattr(ia_items, "MANAGE_URL", f"{base}/ia/manage/")
     monkeypatch.setattr(ia_recovery, "METADATA_URL", f"{base}/ia/metadata")
     monkeypatch.setattr(ia_multipart, "TASKS_URL", f"{base}/ia/tasks")
+    monkeypatch.setattr(ia_tasks, "TASKS_URL", f"{base}/ia/tasks")
     return archive_server

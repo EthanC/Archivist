@@ -210,20 +210,11 @@ is queued. `add_files()` takes the same setting as a keyword argument; pass the
 value the item was uploaded with so recovery does not queue a derive the upload
 skipped.
 
-To derive the item later, submit a `derive.php` task through IA's
-[Tasks API](https://archive.org/developers/tasks.html) with the same LOW key
-pair. Archivist does not submit tasks.
+To derive the item later, call `queue_derive()`, described under
+[Catalog tasks](#catalog-tasks):
 
 ```python
-import niquests
-
-response = niquests.post(
-    "https://archive.org/services/tasks.php",
-    headers={"Authorization": f"LOW {access_key}:{secret_key}"},
-    json={"identifier": "example-video-2026", "cmd": "derive.php"},
-    timeout=30,
-)
-response.raise_for_status()
+submission = client.queue_derive("example-video-2026")
 ```
 
 ### Queue priority
@@ -398,6 +389,10 @@ The sync and async clients use these phase strings:
 | `multipart-complete` | Multipart completion. |
 | `multipart-abort` | Explicit multipart abort. |
 | `multipart-evidence` | Tasks API read confirming a completion. |
+| `task-summary` | Tasks API account summary. |
+| `task-submit-check` | Tasks API read for a pending derive before submitting. |
+| `task-submit` | Tasks API derive submission. |
+| `task-status` | Tasks API lookup of one task. |
 | `request` | Other requests, including uploader catalog polling. |
 
 Request phases describe transport steps. Recovery wrapper `.phase` retains the
@@ -405,7 +400,9 @@ existing `InternetArchiveRecoveryPhase` state-machine value. A network failure
 before a usable response has `status_code=None` and does not inherit status or
 headers from an earlier successful request.
 
-HTTP 429 remains `RateLimitError`; HTTP 503 remains a service-response failure.
+HTTP 429 remains `RateLimitError`; HTTP 503 remains a service-response failure,
+except that the Tasks API methods raise `RateLimitError` for a 503 with a
+`SlowDown` code or a `Retry-After` header.
 Both can carry `retry_after`, and S3 codes such as `SlowDown`, `ServiceUnavailable`,
 and unrecognized future codes remain strings. The library does not infer an
 application retry policy from a code or replay a create/file PUT. HTTP 200 with
@@ -470,6 +467,77 @@ unreadable bodies, and network errors raise the usual classified errors with
 The client does not decide policy. The application chooses whether
 `over_limit=True` defers writes, and how to treat `over_limit=None` or a failed
 check.
+
+### Catalog tasks
+
+The [Tasks API](https://archive.org/developers/tasks.html) methods read the
+account's catalog backlog, queue derives, and report task state. They send the
+same LOW key pair that uploads use, resolved and cached the same way, with no
+session cookies and no redirects.
+
+`upload_limit()` doesn't count catalog tasks. On 2026-11-25, `check_limit`
+reported `accesskey_tasks_queued: 0` and `over_limit: 0` while the account had
+423 queued `derive.php` tasks, and IA rejected item creation with
+`503 SlowDown`. `task_summary()` reports that backlog:
+
+```python
+summary = client.task_summary()
+print(summary.queued, summary.running, summary.error, summary.paused)
+print(summary.outstanding)  # queued + running
+```
+
+The summary covers only your account's tasks. Tasks API listings filtered by
+item also return a `summary`, but those counts cover only the filter, so
+`task_summary()` sends an unfiltered query.
+
+`queue_derive()` submits one `derive.php` task. It first lists the item's live
+derive tasks; when one is queued or running, it returns that task with
+`already_pending=True` and posts nothing. The check only sees derives submitted
+by your own account, so a derive another account queued on the item is not
+detected. The post itself is sent once and is never retried.
+
+```python
+submission = client.queue_derive(
+    "example-video-2026",
+    priority=-5,  # -10 to 10, sent only when given
+    args={"remove_derived": "*.mp4"},
+)
+print(submission.task_id, submission.already_pending, submission.log_url)
+```
+
+Only `derive.php` can be submitted. Neither a parameter nor `args` selects
+another catalog command.
+
+`task_status()` looks a task up in both the live catalog and the finished
+history:
+
+```python
+status = client.task_status(submission.task_id)
+print(status.state, status.submitted_at, status.server)
+```
+
+| `wait_admin` | `InternetArchiveTaskState` |
+| --- | --- |
+| `0` | `QUEUED` |
+| `1` | `RUNNING` |
+| `2` | `ERROR` |
+| `9` | `PAUSED` |
+| history row | `FINISHED` |
+| anything else | `UNKNOWN`, with the value in `raw_state` |
+
+A task ID that matches no row raises `InternetArchiveTaskNotFoundError`.
+`submitted_at` is UTC. IA reports no finish time, so `finished_at` is always
+`None`; a history row is what marks a task `FINISHED`. History rows carry an
+integer `finished` value, exposed as `finished_marker`. It is opaque and is not
+a Unix timestamp.
+
+Reads cap their timeout at 15 seconds; the submission uses the client timeout.
+Every method requires `success: true` and real integers, not booleans or numeric
+strings. A refused request raises `InvalidServiceResponseError` with IA's
+redacted `error` text in `service_message`. HTTP 401 and 403 raise
+`AuthenticationError`, and HTTP 429 or 503 `SlowDown` raise `RateLimitError`
+with any `Retry-After`. Errors carry the `task-*` request phases listed under
+[Failure diagnostics](#failure-diagnostics).
 
 ### Recover interrupted file transfers
 

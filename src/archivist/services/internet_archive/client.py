@@ -44,6 +44,7 @@ from archivist.services.internet_archive import (
     _items,
     _multipart,
     _recovery,
+    _tasks,
 )
 from archivist.services.internet_archive import _diagnostics as diagnostics
 from archivist.services.internet_archive.item_models import (
@@ -62,6 +63,9 @@ from archivist.services.internet_archive.item_models import (
     InternetArchiveRecoveryPhase,
     InternetArchiveRecoveryResult,
     InternetArchiveRemovalResult,
+    InternetArchiveTaskStatus,
+    InternetArchiveTaskSubmission,
+    InternetArchiveTaskSummary,
     InternetArchiveUploadError,
     InternetArchiveUploadFile,
     InternetArchiveUploadFileResult,
@@ -425,6 +429,86 @@ class InternetArchiveClient:
         _items.raise_for_item_status(cast("ResponseLike", response))
         return _items.parse_upload_limit(
             response_mapping(cast("ResponseLike", response), service=_common.SERVICE)
+        )
+
+    def _task_read(self, params: Mapping[str, str], phase: str) -> Mapping[str, object]:
+        """GET the Tasks API with the pinned S3 key and no cookies or redirects."""
+        key = self._recovery_key()
+        response = self._recovery_request(
+            "GET",
+            _tasks.TASKS_URL,
+            key,
+            request_timeout=_tasks.READ_TIMEOUT,
+            params=params,
+            phase=phase,
+        )
+        _tasks.raise_for_task_status(cast("ResponseLike", response))
+        return response_mapping(cast("ResponseLike", response), service=_common.SERVICE)
+
+    @diagnostics.diagnostic_operation
+    def task_summary(self) -> InternetArchiveTaskSummary:
+        """Return the account's catalog task counts from the Tasks API.
+
+        Unlike ``upload_limit``, the counts include the catalog backlog, such as
+        queued derives, that can make IA reject new items with 503 SlowDown.
+        """
+        self._ensure_open()
+        return _tasks.parse_summary(
+            self._task_read(_tasks.summary_params(), _tasks.PHASE_SUMMARY)
+        )
+
+    @diagnostics.diagnostic_operation
+    def queue_derive(
+        self,
+        identifier: str,
+        *,
+        priority: int | None = None,
+        args: Mapping[str, str] | None = None,
+    ) -> InternetArchiveTaskSubmission:
+        """Queue one ``derive.php`` task for an item, unless one is already pending.
+
+        A queued or running derive for the item is returned with
+        ``already_pending=True`` and nothing is submitted, so retrying after a
+        lost response is safe. ``priority`` (-10 to 10) is sent only when given.
+        The submission is attempted exactly once.
+        """
+        self._ensure_open()
+        body = _tasks.derive_body(identifier, priority, args)
+        self._ensure_item_transport()
+        pending = _tasks.pending_derive(
+            self._task_read(
+                _tasks.pending_derive_params(identifier), _tasks.PHASE_SUBMIT_CHECK
+            ),
+            identifier,
+        )
+        if pending is not None:
+            return pending
+        response = self._recovery_request(
+            "POST",
+            _tasks.TASKS_URL,
+            self._recovery_key(),
+            request_timeout=self._timeout,
+            mutation=True,
+            headers={"Content-Type": "application/json"},
+            data=_tasks.encode_body(body),
+            phase=_tasks.PHASE_SUBMIT,
+        )
+        _tasks.raise_for_task_status(cast("ResponseLike", response))
+        return _tasks.parse_submission(
+            response_mapping(cast("ResponseLike", response), service=_common.SERVICE),
+            identifier,
+        )
+
+    @diagnostics.diagnostic_operation
+    def task_status(self, task_id: int) -> InternetArchiveTaskStatus:
+        """Return one task's live or finished state.
+
+        Raises ``InternetArchiveTaskNotFoundError`` when no row matches.
+        """
+        self._ensure_open()
+        params = _tasks.status_params(task_id)
+        return _tasks.parse_status(
+            self._task_read(params, _tasks.PHASE_STATUS), task_id
         )
 
     @diagnostics.diagnostic_operation
