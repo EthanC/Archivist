@@ -10,7 +10,11 @@ from http import HTTPStatus
 from types import MappingProxyType
 from typing import BinaryIO
 
-from archivist.core.errors import InvalidOptionError, InvalidServiceResponseError
+from archivist.core.errors import (
+    InvalidOptionError,
+    InvalidServiceResponseError,
+    ServiceError,
+)
 from archivist.services.internet_archive import _items
 from archivist.services.internet_archive.item_models import (
     InternetArchiveFileDisposition,
@@ -21,7 +25,13 @@ from archivist.services.internet_archive.item_models import (
     InternetArchiveItemTask,
     InternetArchiveItemTaskState,
     InternetArchiveMetadataValue,
+    InternetArchiveRecoveryConflictError,
+    InternetArchiveRecoveryDeferredError,
+    InternetArchiveRecoveryError,
     InternetArchiveRecoveryPhase,
+    InternetArchiveRecoveryReason,
+    InternetArchiveRecoveryResult,
+    InternetArchiveUploadFile,
     _validate_identifier,
 )
 
@@ -521,3 +531,205 @@ def reconcile(  # noqa: PLR0912 - Conservative state checks stay explicit.
             files=tuple(deferred),
         )
     return Reconciliation(dispositions)
+
+
+# Diagnostic request phases for ``transfer_missing_file``.
+PHASE_TRANSFER_IDENTITY = "identity"
+PHASE_TRANSFER_METADATA = "item-metadata"
+PHASE_TRANSFER_UPLOAD = "file-upload"
+TRANSFER_NOT_ACKNOWLEDGED = "file transfer was not acknowledged"
+
+_TRANSFER_PHASES = MappingProxyType(
+    {
+        InternetArchiveRecoveryReason.METADATA_UNRESOLVED: (
+            InternetArchiveRecoveryPhase.RECONCILIATION
+        ),
+        InternetArchiveRecoveryReason.SLOT_OCCUPIED: (
+            InternetArchiveRecoveryPhase.RECONCILIATION
+        ),
+        InternetArchiveRecoveryReason.LISTING_NOT_AUTHORITATIVE: (
+            InternetArchiveRecoveryPhase.RECONCILIATION
+        ),
+        InternetArchiveRecoveryReason.OWNERSHIP_MISMATCH: (
+            InternetArchiveRecoveryPhase.OWNERSHIP
+        ),
+        InternetArchiveRecoveryReason.ITEM_RESTRICTED: (
+            InternetArchiveRecoveryPhase.RECONCILIATION
+        ),
+        InternetArchiveRecoveryReason.SIZE_CHANGED: (
+            InternetArchiveRecoveryPhase.RECONCILIATION
+        ),
+        InternetArchiveRecoveryReason.PROVENANCE_MISSING: (
+            InternetArchiveRecoveryPhase.RECONCILIATION
+        ),
+    }
+)
+
+
+def validate_transfer_call(
+    file: object, *, queue_derive: object, interactive_priority: object
+) -> None:
+    """Apply ``add_files`` type checks to the guarded-transfer arguments."""
+    if not isinstance(queue_derive, bool):
+        raise InvalidOptionError("queue_derive must be a boolean")
+    if not isinstance(interactive_priority, bool):
+        raise InvalidOptionError("interactive_priority must be a boolean")
+    if not isinstance(file, InternetArchiveUploadFile):
+        raise InvalidOptionError("file must be an InternetArchiveUploadFile")
+
+
+def transfer_error(
+    identifier: str,
+    reason: InternetArchiveRecoveryReason,
+    message: str,
+    *,
+    deferred: bool,
+) -> InternetArchiveRecoveryError:
+    """Build the public deferral or conflict for one refused guarded transfer.
+
+    The result has no file outcomes because nothing was hashed or written.
+    """
+    result = InternetArchiveRecoveryResult(identifier, ())
+    cause = ServiceError(message, service=_SERVICE)
+    phase = _TRANSFER_PHASES[reason]
+    if deferred:
+        return InternetArchiveRecoveryDeferredError(
+            result, cause, phase=phase, reason=reason
+        )
+    return InternetArchiveRecoveryConflictError(
+        result, cause, phase=phase, reason=reason
+    )
+
+
+def validate_transfer_metadata(
+    identifier: str, metadata: Mapping[str, str]
+) -> Mapping[str, str]:
+    """Require a nonempty mapping of nonempty string keys and values.
+
+    Wrong types are caller bugs and raise ``InvalidOptionError``. An empty
+    mapping, key, or value means provenance is missing, which is a conflict.
+    """
+    if not isinstance(metadata, Mapping):
+        raise InvalidOptionError("expected_metadata must be a mapping")
+    normalized: dict[str, str] = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise InvalidOptionError(
+                "expected_metadata keys and values must be strings"
+            )
+        normalized[key] = value
+    if not normalized or any(not key or not value for key, value in normalized.items()):
+        raise transfer_error(
+            identifier,
+            InternetArchiveRecoveryReason.PROVENANCE_MISSING,
+            "expected_metadata must contain only nonempty keys and values",
+            deferred=False,
+        )
+    return MappingProxyType(normalized)
+
+
+def validate_transfer_size(identifier: str, expected_size: object) -> int:
+    """Require a positive integer; a nonpositive size is a size conflict.
+
+    It is checked before the source is prepared, which rejects empty files.
+    """
+    if not isinstance(expected_size, int) or isinstance(expected_size, bool):
+        raise InvalidOptionError("expected_size must be an integer")
+    if expected_size <= 0:
+        raise transfer_error(
+            identifier,
+            InternetArchiveRecoveryReason.SIZE_CHANGED,
+            "expected_size must be positive",
+            deferred=False,
+        )
+    return expected_size
+
+
+def check_transfer_size(
+    identifier: str, prepared_size: int, expected_size: int
+) -> None:
+    """Refuse a source whose prepared size is not the acknowledged size."""
+    if prepared_size != expected_size:
+        raise transfer_error(
+            identifier,
+            InternetArchiveRecoveryReason.SIZE_CHANGED,
+            "the prepared file size does not match expected_size",
+            deferred=False,
+        )
+
+
+def _metadata_matches(stored: InternetArchiveMetadataValue | None, value: str) -> bool:
+    return stored in (value, (value,))
+
+
+def authorize_transfer(
+    item: InternetArchiveItem,
+    identity: str,
+    expected_metadata: Mapping[str, str],
+    name: str,
+) -> None:
+    """Apply the guarded-transfer checks in their specified order."""
+
+    def refuse(
+        reason: InternetArchiveRecoveryReason, message: str, *, deferred: bool
+    ) -> None:
+        raise transfer_error(item.identifier, reason, message, deferred=deferred)
+
+    if not item.metadata or item.uploader is None:
+        refuse(
+            InternetArchiveRecoveryReason.METADATA_UNRESOLVED,
+            "item metadata or uploader is unresolved",
+            deferred=True,
+        )
+    if item.uploader != identity:
+        refuse(
+            InternetArchiveRecoveryReason.OWNERSHIP_MISMATCH,
+            "the pinned API credentials do not own the item",
+            deferred=False,
+        )
+    if any(
+        not _metadata_matches(item.metadata.get(key), value)
+        for key, value in expected_metadata.items()
+    ):
+        refuse(
+            InternetArchiveRecoveryReason.PROVENANCE_MISSING,
+            "item provenance metadata does not match",
+            deferred=False,
+        )
+    if item.has_redrow or item.is_dark or item.nodownload:
+        refuse(
+            InternetArchiveRecoveryReason.ITEM_RESTRICTED,
+            "item state does not permit file transfer",
+            deferred=False,
+        )
+    if any(file.name == name for file in item.files):
+        refuse(
+            InternetArchiveRecoveryReason.SLOT_OCCUPIED,
+            "file slot is occupied",
+            deferred=True,
+        )
+    if (
+        not item.listing_complete
+        or item.server_unavailable
+        or item.availability is not InternetArchiveItemAvailability.AVAILABLE
+    ):
+        refuse(
+            InternetArchiveRecoveryReason.LISTING_NOT_AUTHORITATIVE,
+            "item file listing is not authoritative",
+            deferred=True,
+        )
+
+
+def transfer_headers(
+    size: int, *, queue_derive: bool, interactive_priority: bool
+) -> dict[str, str]:
+    """Return the create-only PUT headers for one guarded transfer."""
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(size),
+        "If-None-Match": "*",
+        **_items.priority_headers(interactive_priority),
+    }
+    if not queue_derive:
+        headers["x-archive-queue-derive"] = "0"
+    return headers

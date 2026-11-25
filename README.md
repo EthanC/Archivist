@@ -101,6 +101,23 @@ provenance, filename, size, MD5, and SHA-1 checks. For upload recovery, options,
 and item removal, see the
 [Internet Archive guide](https://archivist.e3n.im/internet_archive/#upload-items).
 
+When you already hold acknowledged facts about one missing original (the item's
+provenance metadata and the file's exact size), `transfer_missing_file()` sends
+a single guarded PUT instead:
+
+| | `add_files()` | `transfer_missing_file()` |
+| --- | --- | --- |
+| Files per call | Any number | Exactly one |
+| Local hashing | MD5 and SHA-1 of every source | None; size must equal `expected_size` |
+| Existing filename | Accepted when checksums match | Deferred (`slot_occupied`) |
+| Waiting and polling | Optional readiness and checksum verification | Never; one read of identity and metadata |
+| Derive gating | Derive queued only on the last missing file | `queue_derive` applies to the one PUT |
+| PUT | Plain PUT | Create-only, with `If-None-Match: *` |
+| Refusals | `InternetArchiveRecoveryError` and its deferred subclass | Deferred or conflict error with a stable `reason` |
+| Returns | `InternetArchiveRecoveryResult` | `InternetArchiveUploadResult` |
+
+See [Transfer one missing file](https://archivist.e3n.im/internet_archive/#transfer-one-missing-file).
+
 ## Internet Archive tasks
 
 Read your account's catalog task backlog, queue a derive, and track it:

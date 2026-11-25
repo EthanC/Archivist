@@ -2,6 +2,7 @@
 
 import logging
 
+from archivist.core._http import parse_retry_after
 from archivist.core.errors import (
     ArchivistError,
     AuthenticationError,
@@ -49,4 +50,5 @@ __all__ = [
     "ServiceError",
     "ServiceStatus",
     "TLSVerificationError",
+    "parse_retry_after",
 ]

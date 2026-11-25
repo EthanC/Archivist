@@ -379,9 +379,9 @@ The sync and async clients use these phase strings:
 | `upload-key` | Authenticated uploader credential lookup. |
 | `identifier-check` | Advisory identifier availability query. |
 | `item-create` | Standalone create-only bucket PUT. |
-| `file-upload` | Original-file PUT during upload or recovery. |
-| `item-metadata` | Metadata API lookup or failed reconciliation. |
-| `identity` | Authenticated `whoami` lookup. |
+| `file-upload` | Original-file PUT during upload, recovery, or `transfer_missing_file()`. |
+| `item-metadata` | Metadata API lookup, including the `transfer_missing_file()` read. |
+| `identity` | Authenticated `whoami` lookup, including the `transfer_missing_file()` read. |
 | `upload-limit` | IAS3 `check_limit` query. |
 | `multipart-initiate` | Multipart upload initiation. |
 | `multipart-part` | One multipart part PUT. |
@@ -628,6 +628,98 @@ Run one writer for an item across processes, restarts, manual edits, and other
 tools. Metadata can change between a read and a PUT, and the reviewed IAS3
 interface does not provide an atomic conditional no-overwrite guarantee.
 
+### Transfer one missing file
+
+`transfer_missing_file()` is the narrow alternative to `add_files()` for callers
+that already hold acknowledged local facts about one original: the item's
+provenance metadata and the file's exact byte count. It sends one guarded PUT
+and returns. It does not hash the source, wait for readiness, poll, verify
+checksums, or hold back the derive task.
+
+```python
+from pathlib import Path
+
+from archivist import (
+    InternetArchiveRecoveryConflictError,
+    InternetArchiveRecoveryDeferredError,
+    InternetArchiveRecoveryReason,
+    InternetArchiveUploadError,
+    InternetArchiveUploadFile,
+)
+
+source = Path("example.txt")
+try:
+    result = client.transfer_missing_file(
+        options.identifier,
+        InternetArchiveUploadFile(source),
+        expected_metadata={
+            "source": options.metadata["source"],
+            "operation": options.metadata["operation"],
+        },
+        expected_size=source.stat().st_size,
+    )
+except InternetArchiveRecoveryDeferredError as error:
+    if error.reason is InternetArchiveRecoveryReason.SLOT_OCCUPIED:
+        ...  # The name is taken; compare it with get_item() yourself.
+    raise  # Otherwise retry later, after another read.
+except InternetArchiveRecoveryConflictError as error:
+    print(error.reason)  # Needs operator action; do not retry.
+    raise
+except InternetArchiveUploadError as error:
+    print(error.failed_file, error.cause.retry_after)
+    raise  # The PUT may have landed; read the item before retrying.
+
+print(result.files[0].etag)
+```
+
+The call runs these steps in order and stops at the first refusal:
+
+1. `expected_metadata` must be a nonempty mapping with nonempty keys and
+   values. Wrong types raise `InvalidOptionError`; an empty mapping, key, or
+   value is a conflict (`provenance_missing`).
+2. `expected_size` must be positive and equal the prepared size of the source
+   from its current position (`size_changed`).
+3. `GET services/user.php?op=whoami` resolves the caller identity of the pinned
+   LOW key pair.
+4. `GET metadata/<identifier>?extended_err=1` reads the item.
+5. Missing item metadata or `uploader` is deferred (`metadata_unresolved`).
+6. An uploader other than the caller is a conflict (`ownership_mismatch`). Any
+   `expected_metadata` value that differs from the stored value is a conflict
+   (`provenance_missing`); a stored one-element list matches its scalar.
+7. `has_redrow`, `is_dark`, or `nodownload` is a conflict (`item_restricted`).
+8. Any existing file with the same name is deferred (`slot_occupied`). Its
+   contents are not compared.
+9. An incomplete listing, unavailable servers, or availability other than
+   `available` is deferred (`listing_not_authoritative`).
+10. `PUT s3/<identifier>/<name>` with `Content-Type: application/octet-stream`,
+    `Content-Length`, and `If-None-Match: *`. `x-archive-interactive-priority: 1`
+    is sent unless `interactive_priority=False`; `x-archive-queue-derive: 0` is
+    sent only with `queue_derive=False`. The PUT is sent once, through the
+    session adapter mounted for its URL, so a caller's bandwidth-limiting
+    adapter still paces the body.
+11. Anything but HTTP 200 with an empty body fails. A 2xx response that is not
+    an empty 200 raises `InvalidServiceResponseError` with the message
+    `file transfer was not acknowledged`. Error statuses keep their usual
+    classification, such as `RateLimitError` with `retry_after` for 503
+    `SlowDown`. Either way the error is wrapped in `InternetArchiveUploadError`
+    with `failed_file` set.
+12. Success returns `InternetArchiveUploadResult` with one file result,
+    `transferred=True`, and the response `ETag`.
+
+`InternetArchiveRecoveryDeferredError` and the new
+`InternetArchiveRecoveryConflictError` both subclass
+`InternetArchiveRecoveryError` and are raised before any write. Branch on their
+`reason`, an `InternetArchiveRecoveryReason`, rather than on message text. Their
+`result.files` is empty because nothing was hashed or transferred. A deferral
+may clear on its own; a conflict needs a person to look at the item. Failures
+reading identity or metadata raise the underlying `ServiceError` unwrapped, with
+`request_phase` `identity` or `item-metadata`.
+
+`parse_retry_after` is exported from `archivist` for callers that read
+`Retry-After` from their own responses. Given a header mapping, it returns the
+parsed value (seconds as a `float`, or an aware UTC `datetime`) and the raw
+header text.
+
 ### Resumable multipart uploads
 
 `upload()` and `add_files()` send each file as one PUT, so a dropped connection
@@ -808,7 +900,9 @@ acceptance without waiting for that final state.
 The async client has the same options, results, ownership rules, and errors:
 
 ```python
-from archivist import AsyncInternetArchiveClient
+from pathlib import Path
+
+from archivist import AsyncInternetArchiveClient, InternetArchiveUploadFile
 
 
 async def upload_example() -> None:
@@ -827,6 +921,14 @@ async def upload_example() -> None:
             wait=True,
         )
         print(snapshot.availability, recovered.verification_complete)
+        supplement = Path("supplement.bin")
+        transferred = await client.transfer_missing_file(
+            options.identifier,
+            InternetArchiveUploadFile(supplement),
+            expected_metadata={"operation": options.metadata["operation"]},
+            expected_size=supplement.stat().st_size,
+        )
+        print(transferred.files[0].etag)
         removals = await client.remove_items([result.identifier])
         print(removals[0].accepted)
 ```

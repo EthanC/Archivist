@@ -120,6 +120,21 @@ class InternetArchiveRecoveryPhase(StrEnum):
     VERIFICATION = "verification"
 
 
+class InternetArchiveRecoveryReason(StrEnum):
+    """Why ``transfer_missing_file`` deferred or refused a transfer.
+
+    Match on these values rather than on exception messages.
+    """
+
+    METADATA_UNRESOLVED = "metadata_unresolved"
+    SLOT_OCCUPIED = "slot_occupied"
+    LISTING_NOT_AUTHORITATIVE = "listing_not_authoritative"
+    OWNERSHIP_MISMATCH = "ownership_mismatch"
+    ITEM_RESTRICTED = "item_restricted"
+    SIZE_CHANGED = "size_changed"
+    PROVENANCE_MISSING = "provenance_missing"
+
+
 def _validate_text(value: object, name: str, *, multiline: bool = False) -> str:
     """Require nonblank Unicode text without controls or surrogate code points."""
     if not isinstance(value, str) or not value.strip():
@@ -526,8 +541,13 @@ class InternetArchiveRecoveryError(ServiceError):
         *,
         phase: InternetArchiveRecoveryPhase,
         failed_file: str | None = None,
+        reason: InternetArchiveRecoveryReason | None = None,
     ) -> None:
-        """Retain the cause (including diagnostics), failed filename, and phase."""
+        """Retain the cause (including diagnostics), failed filename, and phase.
+
+        ``reason`` is set by ``transfer_missing_file`` and is ``None`` for
+        ``add_files`` and other recovery paths.
+        """
         super().__init__(
             "Internet Archive file recovery failed",
             service="Internet Archive",
@@ -537,6 +557,7 @@ class InternetArchiveRecoveryError(ServiceError):
         self.cause = cause
         self.phase = phase
         self.failed_file = failed_file
+        self.reason = reason
 
 
 class InternetArchiveRecoveryDeferredError(InternetArchiveRecoveryError):
@@ -548,10 +569,31 @@ class InternetArchiveRecoveryDeferredError(InternetArchiveRecoveryError):
         cause: ServiceError,
         *,
         phase: InternetArchiveRecoveryPhase,
+        reason: InternetArchiveRecoveryReason | None = None,
     ) -> None:
         """Retain the unresolved phase without implying that a write occurred."""
-        super().__init__(result, cause, phase=phase)
+        super().__init__(result, cause, phase=phase, reason=reason)
         self.args = ("Internet Archive file recovery was deferred",)
+
+
+class InternetArchiveRecoveryConflictError(InternetArchiveRecoveryError):
+    """A refusal raised before any write when item state contradicts the caller.
+
+    Retrying will not help until an operator resolves the conflict named by
+    ``reason``.
+    """
+
+    def __init__(
+        self,
+        result: InternetArchiveRecoveryResult,
+        cause: ServiceError,
+        *,
+        phase: InternetArchiveRecoveryPhase,
+        reason: InternetArchiveRecoveryReason,
+    ) -> None:
+        """Retain the conflicting phase and reason without implying a write."""
+        super().__init__(result, cause, phase=phase, reason=reason)
+        self.args = ("Internet Archive file recovery was refused",)
 
 
 class InternetArchiveMultipartPhase(StrEnum):

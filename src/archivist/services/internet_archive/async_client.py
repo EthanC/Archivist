@@ -840,6 +840,115 @@ class AsyncInternetArchiveClient:
                     return result()
 
     @diagnostics.async_diagnostic_operation
+    async def transfer_missing_file(  # noqa: PLR0913 - Explicit guard fields.
+        self,
+        identifier: str,
+        file: InternetArchiveUploadFile,
+        *,
+        expected_metadata: Mapping[str, str],
+        expected_size: int,
+        queue_derive: bool = True,
+        interactive_priority: bool = True,
+    ) -> InternetArchiveUploadResult:
+        """PUT one missing original into an owned item after fresh ownership checks.
+
+        Use this instead of ``add_files`` when the caller already holds
+        acknowledged local facts (the item's provenance metadata and the
+        file's exact size) and wants one guarded PUT without pre-hashing,
+        readiness waits, checksum verification, or derive gating. The call
+        never polls: it reads the caller identity and item metadata once,
+        then either transfers the file or raises.
+
+        ``InternetArchiveRecoveryDeferredError`` means current state cannot
+        authorize the write yet; ``InternetArchiveRecoveryConflictError`` means
+        it contradicts the caller. Both carry a stable ``reason`` and are raised
+        before any write. ``expected_metadata`` values must equal the stored
+        scalar or one-element list. A failed or unacknowledged PUT raises
+        ``InternetArchiveUploadError`` with ``failed_file`` set; read the item
+        again before retrying, since the outcome may be uncertain.
+        """
+        self._ensure_open()
+        _recovery.validate_transfer_call(
+            file, queue_derive=queue_derive, interactive_priority=interactive_priority
+        )
+        _items._validate_identifier(identifier)
+        expected = _recovery.validate_transfer_metadata(identifier, expected_metadata)
+        expected_size = _recovery.validate_transfer_size(identifier, expected_size)
+        async with _items.async_prepare_files((file,), identifier) as source_files:
+            (prepared,) = source_files
+            _recovery.check_transfer_size(identifier, prepared.size, expected_size)
+            self._ensure_item_transport()
+            key = await self._recovery_key()
+            response = await self._recovery_request(
+                "GET",
+                _common.USER_INFO_URL,
+                key,
+                request_timeout=self._timeout,
+                params={"op": "whoami"},
+                phase=_recovery.PHASE_TRANSFER_IDENTITY,
+            )
+            await _items.async_raise_for_item_status(response)
+            identity = _recovery.parse_identity(
+                await async_response_mapping(response, service=_common.SERVICE)
+            )
+            response = await self._recovery_request(
+                "GET",
+                f"{_recovery.METADATA_URL}/{identifier}",
+                key,
+                request_timeout=self._timeout,
+                params={"extended_err": "1"},
+                phase=_recovery.PHASE_TRANSFER_METADATA,
+            )
+            status = cast("ResponseLike", response).status_code
+            if (
+                status >= HTTPStatus.INTERNAL_SERVER_ERROR
+                or status in {401, 403, 429}
+                or HTTPStatus.MULTIPLE_CHOICES <= status < HTTPStatus.BAD_REQUEST
+            ):
+                await _items.async_raise_for_item_status(response)
+            item = _recovery.parse_item(
+                await async_response_mapping(response, service=_common.SERVICE),
+                identifier,
+                status_code=status,
+            )
+            _recovery.authorize_transfer(item, identity, expected, prepared.name)
+            outcome = InternetArchiveUploadFileResult(prepared.name, prepared.size)
+            try:
+                response = await self._recovery_request(
+                    "PUT",
+                    f"{_items.S3_URL}/{identifier}/{quote(prepared.name, safe='/')}",
+                    key,
+                    request_timeout=self._timeout,
+                    headers=_recovery.transfer_headers(
+                        prepared.size,
+                        queue_derive=queue_derive,
+                        interactive_priority=interactive_priority,
+                    ),
+                    data=_items.AsyncPreparedFile(prepared),
+                    phase=_recovery.PHASE_TRANSFER_UPLOAD,
+                )
+                typed = cast("ResponseLike", response)
+                await _items.async_raise_for_item_status(response)
+                if typed.status_code != HTTPStatus.OK or (
+                    await async_response_text(response, service=_common.SERVICE)
+                ):
+                    raise InvalidServiceResponseError(
+                        _recovery.TRANSFER_NOT_ACKNOWLEDGED,
+                        service=_common.SERVICE,
+                        status_code=typed.status_code,
+                    )
+            except ServiceError as exc:
+                raise InternetArchiveUploadError(
+                    InternetArchiveUploadResult(identifier, (outcome,)),
+                    exc,
+                    failed_file=prepared.name,
+                ) from None
+            return InternetArchiveUploadResult(
+                identifier,
+                (replace(outcome, transferred=True, etag=typed.headers.get("ETag")),),
+            )
+
+    @diagnostics.async_diagnostic_operation
     async def upload(
         self,
         files: Path | Iterable[InternetArchiveUploadFile | str | Path],
