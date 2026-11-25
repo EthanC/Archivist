@@ -106,13 +106,26 @@ def _raise_item_status(
     diagnostics: ServiceDiagnostics,
     authentication_statuses: frozenset[int],
 ) -> None:
-    """Classify status while preserving the shared bounded diagnostics."""
+    """Classify status while preserving the shared bounded diagnostics.
+
+    HTTP 429, and HTTP 503 with a ``SlowDown`` code or a ``Retry-After``
+    header, raise ``RateLimitError``. Every Internet Archive item and task
+    request uses this one rule.
+    """
     message = f"Internet Archive item request returned HTTP {status}"
     if status in authentication_statuses:
         raise AuthenticationError(
             message, service=_SERVICE, status_code=status, **diagnostics
         )
-    if status == HTTPStatus.TOO_MANY_REQUESTS:
+    if status == HTTPStatus.TOO_MANY_REQUESTS or (
+        status == HTTPStatus.SERVICE_UNAVAILABLE
+        and (
+            diagnostics.get("service_code") == "SlowDown"
+            or diagnostics.get("retry_after_raw") is not None
+        )
+    ):
+        # IA sheds load with 503 SlowDown or a 503 carrying Retry-After. Both
+        # are rate limits; a bare 503 stays a service-response failure.
         raise RateLimitError(
             message,
             service=_SERVICE,

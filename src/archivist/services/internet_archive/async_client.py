@@ -433,7 +433,7 @@ class AsyncInternetArchiveClient:
             params=params,
             phase=phase,
         )
-        await _tasks.async_raise_for_task_status(response)
+        await _items.async_raise_for_item_status(response)
         return await async_response_mapping(response, service=_common.SERVICE)
 
     @diagnostics.async_diagnostic_operation
@@ -483,7 +483,7 @@ class AsyncInternetArchiveClient:
             data=_tasks.encode_body(body),
             phase=_tasks.PHASE_SUBMIT,
         )
-        await _tasks.async_raise_for_task_status(response)
+        await _items.async_raise_for_item_status(response)
         return _tasks.parse_submission(
             await async_response_mapping(response, service=_common.SERVICE),
             identifier,

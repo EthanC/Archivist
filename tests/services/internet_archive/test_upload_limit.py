@@ -215,7 +215,7 @@ async def test_unreadable_body_is_a_classified_failure(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "error_type"),
-    [(503, InvalidServiceResponseError), (429, RateLimitError), (302, None)],
+    [(503, RateLimitError), (429, RateLimitError), (302, None)],
 )
 async def test_http_failures_are_classified_with_diagnostics(
     ia_endpoints: ServerState,

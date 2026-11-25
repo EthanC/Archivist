@@ -1,5 +1,14 @@
 # 1.6.0 release notes
 
+## Breaking changes
+
+- 503 SlowDown and 429 responses now raise RateLimitError on every Internet
+  Archive path (previously InvalidServiceResponseError outside the task
+  methods). A 503 with only a `Retry-After` header is also a `RateLimitError`;
+  a 503 with neither stays `InvalidServiceResponseError`. The error keeps
+  `status_code`, `service_code`, `service_message`, `request_id`,
+  `request_phase`, and `retry_after`.
+
 ## Internet Archive tasks
 
 - Added `task_summary()`, `queue_derive()`, and `task_status()` to
@@ -17,16 +26,10 @@
   always `None`, and the row's opaque integer `finished` value is exposed as
   `finished_marker`. A missing task raises `InternetArchiveTaskNotFoundError`.
 - Task requests report `task-summary`, `task-submit-check`, `task-submit`, and
-  `task-status` request phases. HTTP 503 `SlowDown` from these methods raises
-  `RateLimitError`; other methods are unchanged.
-
-No existing API changed.
+  `task-status` request phases.
 
 ## Known limitations
 
-- `upload_limit()` and the upload paths raise `InvalidServiceResponseError` for
-  an HTTP 503 `SlowDown`, while the new task methods raise `RateLimitError`.
-  Unifying them is left for a future major version.
 - The `already_pending` check in `queue_derive()` only sees derives submitted
   by the caller's own account.
 - `queue_derive()` has not yet submitted a task against the live API. Its

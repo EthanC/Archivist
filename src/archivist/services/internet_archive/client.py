@@ -442,7 +442,7 @@ class InternetArchiveClient:
             params=params,
             phase=phase,
         )
-        _tasks.raise_for_task_status(cast("ResponseLike", response))
+        _items.raise_for_item_status(cast("ResponseLike", response))
         return response_mapping(cast("ResponseLike", response), service=_common.SERVICE)
 
     @diagnostics.diagnostic_operation
@@ -493,7 +493,7 @@ class InternetArchiveClient:
             data=_tasks.encode_body(body),
             phase=_tasks.PHASE_SUBMIT,
         )
-        _tasks.raise_for_task_status(cast("ResponseLike", response))
+        _items.raise_for_item_status(cast("ResponseLike", response))
         return _tasks.parse_submission(
             response_mapping(cast("ResponseLike", response), service=_common.SERVICE),
             identifier,

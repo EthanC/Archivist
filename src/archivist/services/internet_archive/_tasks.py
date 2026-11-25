@@ -13,22 +13,16 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from http import HTTPStatus
 from typing import cast
 
 from archivist.core._diagnostics import (
     MAX_FIELD_LENGTH,
     MAX_MESSAGE_LENGTH,
     _safe_text,
-    async_response_diagnostics,
-    response_diagnostics,
 )
-from archivist.core._http import ResponseLike
 from archivist.core.errors import (
     InvalidOptionError,
     InvalidServiceResponseError,
-    RateLimitError,
-    ServiceDiagnostics,
 )
 from archivist.services.internet_archive import _common, _items
 from archivist.services.internet_archive.item_models import (
@@ -76,38 +70,6 @@ def _validate_task_id(task_id: object) -> int:
     if not _is_int(task_id) or cast("int", task_id) <= 0:
         raise InvalidOptionError("task_id must be a positive integer")
     return cast("int", task_id)
-
-
-def raise_for_task_status(response: ResponseLike) -> None:
-    """Classify HTTP failures like item requests, plus 503 SlowDown as a rate limit."""
-    status = response.status_code
-    if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
-        return
-    _raise_task_status(status, response_diagnostics(response))
-
-
-async def async_raise_for_task_status(response: object) -> None:
-    """Classify an async failure after awaiting any lazy body access."""
-    status = cast("ResponseLike", response).status_code
-    if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
-        return
-    _raise_task_status(status, await async_response_diagnostics(response))
-
-
-def _raise_task_status(status: int, diagnostics: ServiceDiagnostics) -> None:
-    # IA answers an overloaded catalog with 503 SlowDown. raise_for_item_status
-    # keeps 503 as an invalid response for existing callers, so this is local.
-    if status == HTTPStatus.SERVICE_UNAVAILABLE and (
-        diagnostics.get("service_code") == "SlowDown"
-        or diagnostics.get("retry_after_raw") is not None
-    ):
-        raise RateLimitError(
-            f"Internet Archive task request returned HTTP {status}",
-            service=_SERVICE,
-            status_code=status,
-            **diagnostics,
-        )
-    _items._raise_item_status(status, diagnostics, frozenset({401, 403}))
 
 
 def _value(data: Mapping[str, object]) -> Mapping[str, object]:

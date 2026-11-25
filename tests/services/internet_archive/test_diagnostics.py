@@ -119,8 +119,9 @@ async def test_create_failure_preserves_s3_diagnostics_without_retry(  # noqa: P
     assert cause.request_phase == "item-create"
     assert cause.retry_after == expected
     assert cause.retry_after_raw == raw
+    # A 503 with SlowDown or Retry-After is a rate limit, like 429.
     assert isinstance(
-        cause, RateLimitError if status == 429 else InvalidServiceResponseError
+        cause, InvalidServiceResponseError if status == 200 else RateLimitError
     )
     assert not any(file.transferred for file in error.result.files)
     assert error.failed_file is None
@@ -154,7 +155,11 @@ async def test_partial_upload_retains_outcomes_and_enriched_serializable_cause(
     assert restored.cause.status_code == status
     assert isinstance(
         restored.cause,
-        AuthenticationError if status == 403 else InvalidServiceResponseError,
+        {
+            200: InvalidServiceResponseError,
+            403: AuthenticationError,
+            503: RateLimitError,
+        }[status],
     )
     assert len(ia_endpoints.requests) == 4
     assert [request.method for request in ia_endpoints.requests] == [
@@ -473,7 +478,7 @@ async def test_get_item_http_failure_is_enriched(
 ) -> None:
     """Expose metadata service failures separately from valid unavailable snapshots."""
     ia_endpoints.item_responses["GET", "/ia/metadata/item"] = (503, S3_ERROR, {})
-    with pytest.raises(InvalidServiceResponseError) as raised:
+    with pytest.raises(RateLimitError) as raised:
         await resolve(client.get_item("item"))
     assert raised.value.request_phase == "item-metadata"
     assert raised.value.request_id == "xml-id"

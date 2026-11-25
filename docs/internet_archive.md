@@ -400,10 +400,14 @@ existing `InternetArchiveRecoveryPhase` state-machine value. A network failure
 before a usable response has `status_code=None` and does not inherit status or
 headers from an earlier successful request.
 
-HTTP 429 remains `RateLimitError`; HTTP 503 remains a service-response failure,
-except that the Tasks API methods raise `RateLimitError` for a 503 with a
-`SlowDown` code or a `Retry-After` header.
-Both can carry `retry_after`, and S3 codes such as `SlowDown`, `ServiceUnavailable`,
+Every Internet Archive request uses one rate-limit rule. HTTP 429, and HTTP 503
+with a `SlowDown` code or a `Retry-After` header, raise `RateLimitError`. A 503
+with neither raises `InvalidServiceResponseError`. In both cases the error keeps
+`status_code`, `service_code`, `service_message`, `request_id`,
+`request_phase`, and any `retry_after`, so callers that branch on those fields
+keep working. Before 1.6.0, a 503 `SlowDown` raised
+`InvalidServiceResponseError` outside the task methods.
+S3 codes such as `SlowDown`, `ServiceUnavailable`,
 and unrecognized future codes remain strings. The library does not infer an
 application retry policy from a code or replay a create/file PUT. HTTP 200 with
 an unexpected acknowledgement body remains a failure and now retains its
@@ -740,8 +744,9 @@ Every multipart mutation, including an abort, uses the upload's saved
 [Queue priority](#queue-priority). Requests follow the identity-isolated recovery transport: the LOW
 key pair only, no session cookies, no redirects, and no retries. Service failures
 raise `InternetArchiveMultipartError` with the latest `state` (or `None` before
-an upload ID exists), `cause`, and `uncertain`. HTTP 503 `SlowDown` keeps its
-`service_code` and `retry_after` on `cause`, as for `upload()`.
+an upload ID exists), `cause`, and `uncertain`. HTTP 503 `SlowDown` makes
+`cause` a `RateLimitError` that keeps its `service_code` and `retry_after`, as
+for `upload()`.
 
 If item creation succeeded but initiation never did, there is no state to
 resume. Calling `upload_multipart()` again then fails with HTTP 409; continue
