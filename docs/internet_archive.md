@@ -495,8 +495,11 @@ item also return a `summary`, but those counts cover only the filter, so
 `task_summary()` sends an unfiltered query.
 
 `queue_derive()` submits one `derive.php` task. It first lists the item's live
-derive tasks; when one is queued or running, it returns that task with
-`already_pending=True` and posts nothing. The check only sees derives submitted
+derive tasks; when one is queued, running or paused, it returns that task with
+`already_pending=True` and posts nothing. Paused derives are usually held by IA
+staff, so no second derive is queued beside them. A failed derive is not
+pending, and a new derive is submitted; check `task_status()` first if you
+want to decide whether to retry it. The check only sees derives submitted
 by your own account, so a derive another account queued on the item is not
 detected. The post itself is sent once and is never retried.
 

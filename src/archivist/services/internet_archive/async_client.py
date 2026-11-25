@@ -458,10 +458,13 @@ class AsyncInternetArchiveClient:
     ) -> InternetArchiveTaskSubmission:
         """Queue one ``derive.php`` task for an item, unless one is already pending.
 
-        A queued or running derive for the item is returned with
+        A queued, running or paused derive for the item is returned with
         ``already_pending=True`` and nothing is submitted, so retrying after a
-        lost response is safe. ``priority`` (-10 to 10) is sent only when given.
-        The submission is attempted exactly once.
+        lost response is safe. A failed derive (``wait_admin`` 2) is not
+        pending, so a new derive is submitted alongside it; check
+        ``task_status()`` first if you need to decide whether to retry one.
+        ``priority`` (-10 to 10) is sent only when given. The submission is
+        attempted exactly once.
         """
         self._ensure_open()
         body = _tasks.derive_body(identifier, priority, args)

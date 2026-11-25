@@ -105,6 +105,19 @@ LIVE_HISTORY_ROW: dict[str, object] = {
     "priority": -4,
     "finished": 4181123504,
 }
+# The shape of a paused live derive catalog row, with a placeholder identifier.
+LIVE_PAUSED_ROW: dict[str, object] = {
+    "task_id": 5765169292,
+    "identifier": IDENTIFIER,
+    "server": "iw902202",
+    "cmd": "derive.php",
+    "args": {},
+    "submittime": "2026-11-17 10:58:35.107053",
+    "submitter": "user@example.com",
+    "priority": 0,
+    "wait_admin": 9,
+    "status": "paused",
+}
 
 
 def row(task_id: int = 101, wait_admin: object = 0, **extra: object) -> dict:
@@ -450,9 +463,11 @@ async def test_derive_posts_exact_json(
         ([row(300, 0)], 300),
         ([row(300, 1)], 300),
         ([row(301, 0), row(299, 1)], 299),
-        ([row(1, 2), row(2, 9), row(300, 0)], 300),
+        ([LIVE_PAUSED_ROW], 5765169292),
+        ([row(301, 0), row(299, 9)], 299),
+        ([row(1, 2), row(300, 0)], 300),
     ],
-    ids=["queued", "running", "oldest", "skips-error-and-paused"],
+    ids=["queued", "running", "oldest", "paused", "paused-and-queued", "skips-error"],
 )
 async def test_pending_derive_short_circuits(
     ia_endpoints: ServerState,
@@ -460,7 +475,7 @@ async def test_pending_derive_short_circuits(
     rows: list[dict[str, object]],
     expected: int,
 ) -> None:
-    """Return the existing queued or running derive without posting."""
+    """Return the existing queued, running or paused derive without posting."""
     reply(ia_endpoints, "GET", 200, listing(rows))
     result = await resolve(client.queue_derive(IDENTIFIER))
     assert result == InternetArchiveTaskSubmission(
@@ -474,17 +489,19 @@ async def test_pending_derive_short_circuits(
     "rows",
     [
         [row(1, 2)],
-        [row(1, 9)],
         [row(1, 5)],
         [row(1, 0, cmd="archive.php")],
         [row(1, 0, identifier="other-item")],
     ],
-    ids=["error", "paused", "unknown", "other-command", "other-item"],
+    ids=["error", "unknown", "other-command", "other-item"],
 )
 async def test_non_pending_rows_do_not_block_submission(
     ia_endpoints: ServerState, client: Client, rows: list[dict[str, object]]
 ) -> None:
-    """Submit when no queued or running derive exists for this item."""
+    """Submit when no queued, running or paused derive exists for this item.
+
+    A failed derive (``wait_admin`` 2) must never count as pending.
+    """
     reply(ia_endpoints, "GET", 200, listing(rows))
     reply(ia_endpoints, "POST", 200, {"success": True, "value": {"task_id": 9}})
     result = await resolve(client.queue_derive(IDENTIFIER))

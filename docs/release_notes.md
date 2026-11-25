@@ -12,8 +12,9 @@
     catalog tasks. IAS3 `check_limit`, behind `upload_limit()`, does not count
     this backlog.
   - `queue_derive()` submits only `derive.php`. It returns the existing task
-    with `already_pending=True` when a derive is already queued or running for
-    the item, so a retry after a lost response is safe.
+    with `already_pending=True` when a derive is already queued, running or
+    paused for the item, so a retry after a lost response is safe. Failed
+    derives are not counted, and a new derive is submitted.
   - `task_status()` returns an `InternetArchiveTaskStatus`. Unrecognized
     `wait_admin` values map to `UNKNOWN` and keep the raw value. A history row
     means `FINISHED`; `finished_at` is always `None`, and the row's opaque

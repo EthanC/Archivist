@@ -146,8 +146,8 @@ so it can report room while IA rejects new items with `503 SlowDown`.
 `task_summary()` reads the backlog from the
 [Tasks API](https://archive.org/developers/tasks.html). `queue_derive()` returns
 the existing task with `already_pending=True` instead of submitting a second
-derive when your account already has one queued or running for the item, so a
-retry after a lost response is safe. Only `derive.php` can be submitted. See the
+derive when your account already has one queued, running or paused for the
+item, so a retry after a lost response is safe. A failed derive does not count. Only `derive.php` can be submitted. See the
 [Internet Archive guide](https://archivist.e3n.im/internet_archive/#catalog-tasks).
 
 ## Archive.today

@@ -52,8 +52,14 @@ _WAIT_ADMIN_STATES = {
     2: InternetArchiveTaskState.ERROR,
     9: InternetArchiveTaskState.PAUSED,
 }
+# Paused derives count as pending: IA staff usually hold them on purpose, so a
+# second derive must not be queued alongside one. Failed (ERROR) derives do not.
 _PENDING = frozenset(
-    {InternetArchiveTaskState.QUEUED, InternetArchiveTaskState.RUNNING}
+    {
+        InternetArchiveTaskState.QUEUED,
+        InternetArchiveTaskState.RUNNING,
+        InternetArchiveTaskState.PAUSED,
+    }
 )
 _SUMMARY_FIELDS = ("queued", "running", "error", "paused")
 
@@ -230,7 +236,7 @@ def parse_status(data: Mapping[str, object], task_id: int) -> InternetArchiveTas
 def pending_derive(
     data: Mapping[str, object], identifier: str
 ) -> InternetArchiveTaskSubmission | None:
-    """Return the oldest queued or running derive for the item, if any."""
+    """Return the oldest queued, running or paused derive for the item, if any."""
     value = _value(data)
     pending = [
         status

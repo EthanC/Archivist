@@ -872,9 +872,10 @@ class InternetArchiveTaskState(StrEnum):
 class InternetArchiveTaskSubmission:
     """A queued derive task, or the one already pending for the item.
 
-    ``already_pending`` is ``True`` when a queued or running ``derive.php``
-    task was found and nothing was submitted. ``log_url`` is only reported for
-    a new submission; IA writes to it once the task starts running.
+    ``already_pending`` is ``True`` when a queued, running or paused
+    ``derive.php`` task was found and nothing was submitted. A failed derive
+    is not pending. ``log_url`` is only reported for a new submission; IA
+    writes to it once the task starts running.
     """
 
     task_id: int
