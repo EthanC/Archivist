@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Literal, TypeAlias
 
+from archivist.core._pickling import frozen_getstate, frozen_setstate
 from archivist.core.errors import InvalidOptionError
 
 logger = logging.getLogger(__name__)
@@ -264,11 +265,18 @@ class InternetArchiveSuccessStatus:
     outlinks: Outlinks = field(default=None, repr=False)
     status: Literal["success"] = field(default="success", init=False)
 
+    __getstate__ = frozen_getstate
+    __setstate__ = frozen_setstate
+
     def __post_init__(self) -> None:
-        """Normalize the capture timestamp to UTC."""
+        """Normalize the capture timestamp to UTC and freeze the outlinks."""
         if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
             raise ValueError("timestamp must include timezone information")
         object.__setattr__(self, "timestamp", self.timestamp.astimezone(UTC))
+        if isinstance(self.outlinks, Mapping):
+            object.__setattr__(self, "outlinks", MappingProxyType(dict(self.outlinks)))
+        elif self.outlinks is not None:
+            object.__setattr__(self, "outlinks", tuple(self.outlinks))
 
     @property
     def wayback_timestamp(self) -> str:
@@ -316,6 +324,9 @@ class InternetArchiveSystemStatus:
     recent_captures: int | None = None
     queues: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
 
+    __getstate__ = frozen_getstate
+    __setstate__ = frozen_setstate
+
     def __post_init__(self) -> None:
         """Copy queue metrics into an immutable mapping."""
         object.__setattr__(self, "queues", MappingProxyType(dict(self.queues)))
@@ -359,6 +370,9 @@ class InternetArchiveCdxRecord:
     fields: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({}), repr=False
     )
+
+    __getstate__ = frozen_getstate
+    __setstate__ = frozen_setstate
 
     def __post_init__(self) -> None:
         """Normalize the timestamp and freeze the raw fields."""

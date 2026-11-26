@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any, BinaryIO, TypeAlias, cast
 from unicodedata import category
 
+from archivist.core._pickling import frozen_getstate, frozen_setstate
 from archivist.core.errors import (
     InvalidOptionError,
     OptionCombinationError,
@@ -228,6 +229,9 @@ class InternetArchiveItem:
     extended_error_code: str | None = None
     unavailable_reason: str | None = None
 
+    __getstate__ = frozen_getstate
+    __setstate__ = frozen_setstate
+
     def __post_init__(self) -> None:
         """Freeze all response containers without inventing missing values."""
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
@@ -336,6 +340,9 @@ class InternetArchiveUploadOptions:
     )
     queue_derive: bool = True
     interactive_priority: bool = True
+
+    __getstate__ = frozen_getstate
+    __setstate__ = frozen_setstate
 
     def __post_init__(self) -> None:
         """Validate typed fields, collection choices, and custom metadata keys."""
@@ -499,6 +506,9 @@ class InternetArchiveUploadLimit:
     over_limit: bool | None = None
     limit_reason: str | None = None
     counters: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+
+    __getstate__ = frozen_getstate
+    __setstate__ = frozen_setstate
 
     def __post_init__(self) -> None:
         """Copy counters into a read-only mapping."""

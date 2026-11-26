@@ -1,3 +1,25 @@
+# 1.6.1 release notes
+
+## Fixed
+
+- Every public model can be pickled again, so results can cross a process
+  boundary (for example, as a `multiprocessing` return value) and be copied with
+  `copy.deepcopy()`. Models that hold a read-only mapping raised
+  `TypeError: cannot pickle 'mappingproxy' object`: `InternetArchiveItem`
+  (`metadata`), `InternetArchiveUploadOptions` (`metadata`),
+  `InternetArchiveUploadLimit` (`counters`), `InternetArchiveSystemStatus`
+  (`queues`), `InternetArchiveCdxRecord` (`fields`, and so any
+  `InternetArchiveCdxResult`), and `InternetArchiveSuccessStatus` (mapping
+  `outlinks`). Errors that carry these models, such as
+  `InternetArchiveUploadError`, pickle as well. Unpickled models are equal to
+  the originals and their mappings are still read-only.
+
+## Changed
+
+- `InternetArchiveSuccessStatus` now stores `outlinks` read-only when it is
+  built directly: a mapping is copied into a `MappingProxyType` and a sequence
+  into a tuple. Parsed responses already used these types.
+
 # 1.6.0 release notes
 
 ## Added

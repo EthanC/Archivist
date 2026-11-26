@@ -10,6 +10,7 @@ from http import HTTPStatus
 from types import MappingProxyType
 from typing import BinaryIO
 
+from archivist.core._pickling import frozen_getstate, frozen_setstate
 from archivist.core.errors import (
     InvalidOptionError,
     InvalidServiceResponseError,
@@ -101,6 +102,9 @@ class Reconciliation:
     dispositions: Mapping[str, InternetArchiveFileDisposition] = field(
         default_factory=lambda: MappingProxyType({})
     )
+
+    __getstate__ = frozen_getstate
+    __setstate__ = frozen_setstate
 
     def __post_init__(self) -> None:
         """Freeze the per-file decision mapping."""
