@@ -86,7 +86,7 @@ from archivist.services.internet_archive import (
     InternetArchiveUserStatus,
 )
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 __all__ = [
     "ArchiveRecord",
